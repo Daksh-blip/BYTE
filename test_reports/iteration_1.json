@@ -1,0 +1,56 @@
+{
+  "summary": "Iteration 1. Backend: 14 pytest cases run against the public URL (12 core + 2 security). 10 of 12 core cases pass; both security cases fail. Auth (register/dev_code, verify, 403 EMAIL_NOT_VERIFIED, 401 wrong password, resend, forgot/reset), PUT /me (age gate, intention validation, max 3 prompts, onboarding needs a photo), photos (rejects non-images, max 6, set primary, delete, /files returns 401 without a token and 200 with ?token=), discover in all 4 modes (gender prefs both ways, compatibility present, swiped users excluded, paused users hidden), swipes/match created once, notes and superlikes in /likes, undo works only for the last pass, a third user gets 404 on another pair's match and messages, messages store only ciphertext, block/unblock/report, export and account deletion all work. Bugs found: (1) liking someone again after an unmatch or block returns the old, inactive match_id, so the pair can never chat again; (2) POST /blocks accepts an invalid id, and after that GET /discover returns 404 for the blocker; (3) the rate limiter can be bypassed by sending a fake X-Forwarded-For header; (4) /reports accepts user ids that don't exist. Frontend at 390x844: every requested flow passes. That covers welcome→signup→verify (dev code shown)→4-step onboarding with photo upload→discover, Leo login, all 4 mode chips, pass/undo/like, opening a profile (compatibility, Demo badge, prompt), and Maya↔Leo E2EE chat in two browser contexts (icebreakers on an empty chat, messages decrypt both ways through the 3s poll, matching safety numbers in both contexts). It also covers report (which auto-blocks)/block, the pause switch, unblocking from the blocked list, edit profile (prompt, intention, language, bio, job saved and confirmed via the API), the export download, and sign out. Leo's like on Maya was sent via the API because a cold-load deep link to /user/{id} did not open the profile. No deprecated Expo packages (expo-av/expo-barcode-scanner/expo-background-fetch) or SafeAreaView issues detected.",
+  "backend_issues": {
+    "critical": [
+      {"endpoint": "POST /api/swipes (create_match_if_mutual)", "issue": "After an unmatch or block, liking again returns matched=true with the OLD inactive match_id (GET /matches/{id} returns 404). The pair can never re-match or chat. Cause: server.py:790 looks up the existing match without checking active. Fix: reactivate it (set active=True, reset unread) or create a new one.", "priority": "HIGH"},
+      {"endpoint": "POST /api/blocks → GET /api/discover", "issue": "/blocks accepts any user_id (invalid or non-existent). Once an invalid id like 'not-an-objectid' is blocked, the blocker's GET /discover always returns 404, because oid() raises inside the $nin list (server.py:738). Fix: check that the target user exists in /blocks and /reports, and skip invalid ids in blocked_ids/discover.", "priority": "HIGH"},
+      {"endpoint": "rate_limit (all /auth/*)", "issue": "The rate limiter keys on the first X-Forwarded-For hop, which the client controls (server.py:200). Changing the header bypasses brute-force protection on login, verify and reset codes (confirmed by test). The limiter is also in-memory per process. Fix: use the last trusted proxy hop or the real client IP, and add per-email limits (verify/reset already have 5 attempts per code).", "priority": "HIGH"}
+    ],
+    "minor": [
+      {"endpoint": "POST /api/reports", "issue": "Accepts non-existent user_ids and self-reports (returns 200)."},
+      {"endpoint": "DELETE /api/me", "issue": "Doesn't delete the user's reports, auth_codes or uploaded photo objects in storage. DELETE /me/photos/{id} also leaves the object in storage. This is a privacy/GDPR gap for a privacy-first app."},
+      {"endpoint": "POST /api/matches/{id}/messages", "issue": "Doesn't check that sender_public_key equals the sender's current key or that recipient_public_key equals the other user's key."},
+      {"endpoint": "POST /api/swipes", "issue": "Lets you swipe on paused or not-yet-onboarded users."},
+      {"endpoint": "POST /api/auth/register", "issue": "Returns 400 'account exists', which lets anyone check whether an email is registered (account enumeration)."}
+    ]
+  },
+  "frontend_issues": {
+    "ui_bugs": [
+      {"component": "Chat optimistic send", "issue": "The sender's own message was missing from the list 2s after sending. It appeared on the next poll. Likely race: a loadMessages() poll already in flight calls setRows with server data and overwrites the optimistic tmp row, then line 79 maps a tempId that no longer exists. Ref: /app/frontend/app/chat/[matchId].tsx:41-86. Fix: merge pending rows in loadMessages, or pause polling while sending.", "testID": "chat-send-button", "priority": "MEDIUM"},
+      {"component": "Deep link /user/{userId}", "issue": "Loading /user/{id} directly on a cold start (while signed in) lands on Discover instead of the profile. The auth/onboarding redirect drops the intended route.", "testID": "user-profile-screen", "priority": "LOW"},
+      {"component": "Swipe card stack", "issue": "The back card renders the same testIDs as the top card (card-open-profile, card-compatibility, etc.). A .first selector hits the back card, whose taps are intercepted. Give the back card different testIDs or set pointerEvents='none' on it.", "testID": "card-open-profile", "priority": "LOW"}
+    ],
+    "integration_issues": [],
+    "design_issues": [
+      {"screen": "Onboarding DOB", "issues": ["On web, the focus outline of the Year input extends past the right edge of the screen (a default outline shows beside the custom focus ring)."]},
+      {"screen": "Likes → profile → like", "issues": ["Mutual like from the Likes tab opens chat directly without the match celebration modal. Discover shows the modal. Confirm this is intended."]},
+      {"screen": "Safety report", "issues": ["Submitting a report also blocks the user and closes the chat. Make sure the button or label tells the user it will block too."]}
+    ],
+    "react_native_issues": [
+      {"component": "Settings export (native)", "issue": "On native, export uses Share.share({message: <full JSON>}). Large exports may be truncated or rejected by share targets. Better to write a file with expo-file-system and share it with expo-sharing. Reference: /app/frontend/app/settings.tsx:45"}
+    ]
+  },
+  "test_report_links": ["/app/backend/tests/test_bytetalks_api.py", "/app/backend/tests/test_bytetalks_security.py", "/app/test_reports/pytest/pytest_results.xml"],
+  "action_items": [
+    "Fix create_match_if_mutual to reactivate or recreate inactive matches (server.py:785-794)",
+    "Validate the target user exists in POST /blocks and POST /reports (reject self and invalid ids), and make discover robust to invalid ids in blocked_ids (server.py:738)",
+    "Stop trusting a client-supplied X-Forwarded-For first hop in rate_limit, and add per-email throttling for login",
+    "Fix the chat poll race that overwrites optimistic messages ([matchId].tsx loadMessages/send)",
+    "Make DELETE /me also remove reports, auth_codes and storage objects, and make photo delete remove the storage object",
+    "Keep the intended route through the auth redirect so /user/{id} deep links work",
+    "Optional: split server.py (1033 lines) into routers (auth, profile, discover, chat, safety, seed)"
+  ],
+  "critical_code_review_comments": [
+    "server.py is 1033 lines; over the 700-line guideline",
+    "send_message trusts client-supplied public keys without checking them against the stored identity keys",
+    "Seed auto-like-back (60%) makes match tests nondeterministic; tests use fresh signups",
+    "Rate-limit state is in-memory, so it resets on restart and isn't shared across workers"
+  ],
+  "updated_files": ["/app/backend/tests/test_bytetalks_api.py", "/app/backend/tests/test_bytetalks_security.py"],
+  "success_rate": {"backend": "83% (10/12 core); 2 security checks failed", "frontend": "100% of requested flows passed (3 minor UI bugs)"},
+  "seed_data_creation": "No seed data created. All TEST_ users (test_*@example.com) were deleted. Swipes, matches, messages and the block between Maya and Leo were removed from the DB, and TEST reports deleted, so the next run can re-match them. Maya's paused flag was restored to false. Some Leo swipes made from the UI (likes on Sofia and others) may remain.",
+  "retest_needed": true,
+  "should_main_agent_self_test": true,
+  "context_for_next_testing_agent": "Tests set a random X-Forwarded-For header to avoid the per-IP rate limiter. Run with: EXPO_PUBLIC_BACKEND_URL=... pytest /app/backend/tests (pytest.ini uses xdist). RN Pressables on web need a normal .click(); force=True didn't trigger navigation. Use .last for card testIDs (stacked cards). Tab testIDs: tab-discover/likes/chats/profile; profile rows: profile-edit-row/profile-settings-row/profile-blocked-row. Each new browser context generates a new keypair on login. Maya id 6ae0f0ee10acf72d98dbf2a6, Leo id 6ae0f0ee10acf72d98dbf2a7.",
+  "rca_of_issue": "Rematch bug: block/unmatch sets matches.active=False, but create_match_if_mutual finds the match by users only and returns the inactive id. Discover 404: blocked_ids() returns the raw stored ids, and discover calls oid(x) on each one, which raises HTTPException(404) for malformed ids."
+}

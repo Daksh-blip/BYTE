@@ -1,0 +1,51 @@
+{
+  "summary": "Iteration 2 retest. Backend: all 8 fixes from iteration_1 verified (17/17 pytest: existing 14 + 3 new in test_bytetalks_iter2_fixes.py covering rematch after unmatch, 400 on invalid/nonexistent/self block+report ids, discover still OK, 409 on sender/recipient key mismatch, spoofed public X-Forwarded-For can't bypass per-IP limiter, per-email login limit, delete account). Frontend (375x667, Leo + Maya in two browser contexts): login, discover modes (smart/explore/new/interests), pass -> undo brings back the same card, open profile from card, no duplicate testIDs (back card uses swipe-card-next-*), deep link /user/{id} now renders after session restore, like-with-note from the Likes tab -> match -> chat, E2EE chat decrypts both ways, own sent message stays on screen through 7s of polling (no flicker), DB only stores ciphertext, key-change banner and safety number show, unmatch from chat menu then re-like from both sides makes the match active again (same match id, messages cleared), edit profile prompts add/edit saved, settings export downloads bytetalks-data.json on web. New bug: router.back() is used with no fallback, so back/close buttons on deep-linked screens do nothing and show the error toast \"The action 'GO_BACK' was not handled\".",
+  "backend_issues": {
+    "critical": [],
+    "minor": [
+      {"endpoint": "POST /api/swipes", "issue": "Demo seed profiles like you back 60% of the time (server.py:837-839). This is intended demo behaviour, but it makes the documented 'Leo likes Maya, then Maya likes Leo from the Likes tab' E2EE test flow random: Leo's like often matches straight away and Maya's Likes tab is then empty. Document this in test_credentials.md, or skip the auto-like for maya/leo."}
+    ]
+  },
+  "frontend_issues": {
+    "ui_bugs": [
+      {"component": "Back/close navigation on deep-linked screens", "issue": "router.back() is called with no canGoBack() fallback. When /user/{id}, /chat/{id} or /edit-profile is opened directly on web (no history), user-close-button and chat-back-button do nothing (the URL stays the same) and an error toast says \"The action 'GO_BACK' was not handled\". In user/[userId].tsx swipe(), router.back() runs inside the try block, so after a successful like or pass the GO_BACK error is shown as an error toast and the user stays stuck on the profile. Reference: app/user/[userId].tsx:48,57,85; app/chat/[matchId].tsx:133,141; app/edit-profile.tsx:78; safety-sheet onDone handlers", "testID": "user-close-button, chat-back-button, user-like-button, user-pass-button, user-error-back, chat-gone-back", "priority": "HIGH"},
+      {"component": "Chat optimistic send race", "issue": "If a 3s poll that already includes the new message comes back before the POST response, the poll's row (server id) and the pending tmp row both show. The POST handler then turns the tmp row into the same id, so the FlatList has two rows with the same key until the next poll removes one (a duplicate bubble for up to 3s). Not reproduced in testing. Fix: in send(), after the POST, drop the tmp row if a row with m.id already exists. Reference: app/chat/[matchId].tsx:52-55,86", "testID": "message-*", "priority": "LOW"}
+    ],
+    "integration_issues": [],
+    "design_issues": [
+      {"screen": "Chat", "issues": ["The 'Encrypted on another device' placeholder (grey italic) on the user's own cyan bubble has low contrast. Use a darker text colour on mine-bubbles."]},
+      {"screen": "Profile / Settings", "issues": ["profile-preview-button is 101x40 and the settings pause switch is 40x20, both under the 44pt minimum touch target. Make the switch row itself tappable or add hitSlop."]}
+    ],
+    "react_native_issues": [
+      {"component": "Sheet keyboard handling", "issue": "The Sheet modal has no KeyboardAvoidingView, so on iOS/Android the keyboard will cover like-note-input / like-note-send and report-details-input / report-submit-button. Reference: src/components/sheet.tsx:23-31"}
+    ]
+  },
+  "test_report_links": [
+    "/app/backend/tests/test_bytetalks_api.py",
+    "/app/backend/tests/test_bytetalks_security.py",
+    "/app/backend/tests/test_bytetalks_iter2_fixes.py",
+    "/app/test_reports/pytest/pytest_results_iter2.xml",
+    "/app/test_reports/pytest/pytest_iter2_fixes.xml"
+  ],
+  "action_items": [
+    "Add a safe back helper, e.g. const goBack = () => router.canGoBack() ? router.back() : router.replace('/discover') (or '/chats' or '/profile' depending on context), and use it in place of every router.back() in app/user/[userId].tsx, app/chat/[matchId].tsx, app/edit-profile.tsx and safety-sheet.",
+    "In user/[userId].tsx swipe(), do the navigation outside the try block so a navigation error never shows as a failed like.",
+    "Wrap the Sheet content in a KeyboardAvoidingView (behavior='padding' on iOS) so the like-note and report text inputs and their submit buttons stay visible above the keyboard.",
+    "Remove duplicate rows by id after the optimistic send in chat.",
+    "Minor: fix the contrast of the undecryptable placeholder on own bubbles, and make sure touch targets are at least 44pt (profile-preview-button, settings switch).",
+    "Optional: split server.py (1067 lines) into routers."
+  ],
+  "critical_code_review_comments": [
+    "server.py is 1067 lines (over 700); split it into auth, profile, discover, chat, safety and seed routers.",
+    "auth.tsx:39: on session restore ensureKeys() is not awaited before children render, so a chat opened straight after a reload could try to decrypt before the keys are loaded, and the decrypt cache would keep the null result. Not reproduced in 3 chat reloads, but awaiting it (or cache-busting nulls once the keys are ready) would make it robust.",
+    "auth.tsx:55: if PUT /me/public-key fails, ensureKeys errors are silently swallowed. The user can then send messages that fail with 409 and see no clear recovery path.",
+    "Rate limiter state is in memory (_hits): it resets on restart and isn't shared across workers. This is acceptable for the preview."
+  ],
+  "updated_files": ["/app/backend/tests/test_bytetalks_iter2_fixes.py"],
+  "success_rate": {"backend": "100% (17/17)", "frontend": "~90% (all requested flows pass; GO_BACK bug on deep-linked back/close buttons)"},
+  "seed_data_creation": "No new seed data. After testing, removed the Leo<->Maya swipes, match and messages so the pair is back to its original clean state, and restored Leo's prompts to the seed value. 2 leftover test_* users exist from earlier runs.",
+  "retest_needed": true,
+  "should_main_agent_self_test": true,
+  "context_for_next_testing_agent": "Login limiter is 10/5min per IP and 8/5min per email; run 'sudo supervisorctl restart backend' to reset it between heavy runs. Run pytest with EXPO_PUBLIC_BACKEND_URL set (pytest.ini adds -n; use -n 0 for single files). Each browser context creates a new key pair, so messages sent to an older key show 'Encrypted on another device' (by design). Profile actions (like/pass/note) only appear with ?actions=1 on /user/{id}. Tab buttons have testIDs tab-discover/likes/chats/profile. Maya and Leo are seeds, so a like has a 60% chance of being auto-liked back. Leo ID 6ae0f0ee10acf72d98dbf2a7, Maya ID 6ae0f0ee10acf72d98dbf2a6.",
+  "rca_of_issue": "GO_BACK: expo-router's router.back() dispatches GO_BACK, and with no history stack (direct URL load on web, or a cold-start deep link on native) no navigator handles it. The app's error handler shows this as a toast. Repro: log in, open /user/<id> or /chat/<id> directly, then tap close/back. Mitigation: router.canGoBack() with a router.replace fallback."
+}

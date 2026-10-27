@@ -1,0 +1,181 @@
+{
+  "app_name": "BYTE TALKS",
+  "personality": "6 Glass / Luxe structure with 1 iOS-Native Clean typography",
+  "personality_one_liner": "A premium, cinematic dating experience driven by electric accents, deep midnight glass layers, and crisp readable typography.",
+  "color": {
+    "surface": "#090A0F",
+    "onSurface": "#F2F2F4",
+    "surfaceSecondary": "#151722",
+    "onSurfaceSecondary": "#E5E6EB",
+    "surfaceTertiary": "#212330",
+    "onSurfaceTertiary": "#D1D3DA",
+    "surfaceInverse": "#FFFFFF",
+    "onSurfaceInverse": "#000000",
+    "brand": "#00E5FF",
+    "onBrand": "#000000",
+    "brandPrimary": "#00E5FF",
+    "onBrandPrimary": "#000000",
+    "brandSecondary": "#B238FF",
+    "onBrandSecondary": "#FFFFFF",
+    "brandTertiary": "#FF4D94",
+    "onBrandTertiary": "#FFFFFF",
+    "success": "#00FF9D",
+    "onSuccess": "#000000",
+    "warning": "#FFB800",
+    "onWarning": "#000000",
+    "error": "#FF3366",
+    "onError": "#FFFFFF",
+    "info": "#00E5FF",
+    "onInfo": "#000000",
+    "border": "#2C2E3E",
+    "borderStrong": "#44475A",
+    "divider": "#1F212D",
+    "muted": "#8B8D99"
+  },
+  "typography": {
+    "displayFontFamily": "Plus Jakarta Sans",
+    "textFontFamily": "Plus Jakarta Sans",
+    "scale": {
+      "sm": 12,
+      "base": 14,
+      "lg": 16,
+      "xl": 20,
+      "2xl": 24
+    }
+  },
+  "spacing": {
+    "rule": "Generous margins, deep vertical rhythm to allow dark surfaces to breathe.",
+    "xs": 4,
+    "sm": 8,
+    "md": 12,
+    "lg": 16,
+    "xl": 24,
+    "2xl": 32,
+    "3xl": 48
+  },
+  "radius_tokens": {
+    "sm": 8,
+    "md": 16,
+    "lg": 24,
+    "pill": 999
+  },
+  "shadow_tier": "0",
+  "navigation": "bottom_tabs",
+  "icon_set": "Phosphor",
+  "glassmorphism": {
+    "enabled": true,
+    "do's": [
+      "Use glass overlays on the bottom tab bar and sticky headers.",
+      "Apply blurred overlays for premium 'Likes You' grid paywalls.",
+      "Layer translucent floating action buttons over swipe cards.",
+      "Ensure strong text readability over glass using translucent underlying tints."
+    ],
+    "dont's": [
+      "Never blur body text regions or form fields.",
+      "Do not use multiple glass layers stacked on top of each other."
+    ]
+  },
+  "platform_libraries": {
+    "glass": {
+      "ios": "expo-glass-effect",
+      "android": "expo-blur",
+      "low_end_android_fallback": "solid surfaceSecondary"
+    },
+    "image": "expo-image",
+    "blur": "expo-blur",
+    "bottom_sheet": "@gorhom/bottom-sheet",
+    "animation": "react-native-reanimated",
+    "gesture": "react-native-gesture-handler"
+  },
+  "screens": [
+    {
+      "name": "Discover (Swipe)",
+      "purpose": "Primary swipe card stack to view potential matches.",
+      "states": {
+        "loading": "Centered brand-colored activity indicator on midnight background.",
+        "empty": "Illustration of a radar/search pulse with 'No new profiles nearby'.",
+        "error": "Message 'Connection lost' with a Retry button."
+      },
+      "layout": "Full-screen swipeable profile card taking up the majority of the view. Include segmented photo progress indicators at the top. Action buttons (skip, like) float over the bottom of the card using glass styling. Overlay bottom portion of the card with a gradient-to-dark scrim (top-to-bottom) for bio/text readability."
+    },
+    {
+      "name": "Likes Received",
+      "purpose": "Grid displaying users who liked the profile.",
+      "states": {
+        "loading": "Skeleton loader grid with shimmer effect.",
+        "empty": "Empty state illustration with text 'No likes yet. Keep swiping!'",
+        "error": "Error message with a Retry button."
+      },
+      "layout": "2-column grid. For non-premium users, apply heavy blur/glass over the profile photos to gate the content, with a centered premium CTA floating above the blur."
+    },
+    {
+      "name": "Messages (Chat List & Detail)",
+      "purpose": "E2EE secure messaging list and individual chat thread.",
+      "states": {
+        "loading": "Skeleton list items for the chat list.",
+        "empty": "Illustration showing encrypted lock with 'Start matching to chat securely.'",
+        "error": "Error loading chats message with Retry button."
+      },
+      "layout": "List: Stacked rows with avatars, names, and a badge for unread. Detail: Sticky glass header with user info and E2EE lock icon indicator. Scrollable message bubbles (cyan/violet for user, dark grey for match). Bottom-fixed text input field."
+    },
+    {
+      "name": "Profile",
+      "purpose": "Manage user photos, bio, and app settings.",
+      "states": {
+        "loading": "Skeleton loaders for photo gallery.",
+        "empty": "Not applicable (Profile always exists).",
+        "error": "Error loading profile data with Retry button."
+      },
+      "layout": "Hero profile banner at the top, transitioning into a scrollable form for bio/interests. Distinct settings rows housed in rounded `surfaceSecondary` containers with `brandTertiary` tinted icons."
+    },
+    {
+      "name": "Onboarding",
+      "purpose": "Account creation, profile setup, and age verification.",
+      "states": {
+        "loading": "Spinner during auth processing.",
+        "empty": "N/A",
+        "error": "Inline validation errors on inputs."
+      },
+      "layout": "Step-by-step wizard. Full-width inputs with labels above. Sticky primary CTA at the bottom using KeyboardAvoidingView. Atmospheric dark abstract texture in the background."
+    }
+  ],
+  "images": {
+    "hero_portrait_1": {
+      "url": "https://images.unsplash.com/photo-1544005313-94ddf0286df2?crop=entropy&cs=srgb&fm=jpg&ixid=M3w4NTYxODl8MHwxfHNlYXJjaHwxfHx5b3VuZyUyMGFkdWx0JTIwcG9ydHJhaXQlMjBwaG90b2dyYXBoeXxlbnwwfHx8fDE3OTMxMjU4Mzh8MA&ixlib=rb-4.1.0&q=85",
+      "alt": "smiling woman wearing white and black pinstriped collared top"
+    },
+    "hero_portrait_2": {
+      "url": "https://images.unsplash.com/photo-1506863530036-1efeddceb993?crop=entropy&cs=srgb&fm=jpg&ixid=M3w4NTYxODl8MHwxfHNlYXJjaHwyfHx5b3VuZyUyMGFkdWx0JTIwcG9ydHJhaXQlMjBwaG90b2dyYXBoeXxlbnwwfHx8fDE3OTMxMjU4Mzh8MA&ixlib=rb-4.1.0&q=85",
+      "alt": "grayscale photo of woman wearing necklace and top"
+    },
+    "hero_portrait_3": {
+      "url": "https://images.unsplash.com/photo-1552699611-e2c208d5d9cf?crop=entropy&cs=srgb&fm=jpg&ixid=M3w4NTYxODl8MHwxfHNlYXJjaHwzfHx5b3VuZyUyMGFkdWx0JTIwcG9ydHJhaXQlMjBwaG90b2dyYXBoeXxlbnwwfHx8fDE3OTMxMjU4Mzh8MA&ixlib=rb-4.1.0&q=85",
+      "alt": "girl wearing black top selective focus photography"
+    },
+    "dark_abstract_bg": {
+      "url": "https://images.unsplash.com/photo-1710438399422-2fca27686bcd?crop=entropy&cs=srgb&fm=jpg&ixid=M3w3NTY2OTV8MHwxfHNlYXJjaHwxfHxtb2Rlcm4lMjBkYXJrJTIwYWJzdHJhY3QlMjB0ZXh0dXJlJTIwYmFja2dyb3VuZHxlbnwwfHx8fDE3OTMxMjU4Mzh8MA&ixlib=rb-4.1.0&q=85",
+      "alt": "a black and green background with wavy lines"
+    },
+    "e2ee_lock_illustration": {
+      "url": "https://images.unsplash.com/photo-1614064548237-096f735f344f?crop=entropy&cs=srgb&fm=jpg&ixid=M3w4NjA0MTJ8MHwxfHNlYXJjaHwxfHxuZW9uJTIwY3liZXIlMjBzZWN1cml0eSUyMGxvY2slMjBkYXJrfGVufDB8fHx8MTc5MzEyNTgzOHww&ixlib=rb-4.1.0&q=85",
+      "alt": "padlock on laptop with light trails"
+    }
+  },
+  "instructions_to_main_agent": [
+    "Follow the 'Glass / Luxe' aesthetic but keep the typography clean (Plus Jakarta Sans) to maintain a modern, tech-focused dating feel.",
+    "The user explicitly requested 'electric cyan, violet, and subtle pink accents on deep charcoal/midnight bg'. Strictly use the colors defined in the palette. Do not replace with system defaults.",
+    "For the Discover (Swipe) screen, use `react-native-gesture-handler` and `react-native-reanimated` to build a smooth, stack-based swipe card interaction.",
+    "Implement gradient-to-dark scrims (top-to-bottom) on all photo cards (hero images) so text overlay remains WCAG compliant.",
+    "Design the Chat interface with a visible lock icon in the header to signal End-to-End Encryption (E2EE), reinforcing privacy and security.",
+    "Gated content (e.g., 'Likes Received' for free users) should utilize intense glassmorphism/blur to obscure the photo grid underneath.",
+    "Use Haptics contextually: trigger subtle feedback on swipes (like/pass), message sent, and tab bar navigation.",
+    "Ensure touch targets are at least 44x44pt and safe area insets are respected, especially for sticky action buttons and bottom tabs."
+  ],
+  "haptics": {
+    "swipe_like": "success",
+    "swipe_pass": "impactLight",
+    "tab_press": "selection",
+    "message_sent": "impactMedium",
+    "button_press": "impactLight"
+  }
+}
