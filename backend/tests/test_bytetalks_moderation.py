@@ -10,7 +10,7 @@ PW = "ByteTalks123!"
 _env = dotenv_values("/app/backend/.env")
 DB = MongoClient(_env["MONGO_URL"])[_env["DB_NAME"]]
 ADMIN_EMAIL = "admin@bytetalks.app"
-ADMIN_PW = "D3WjHmkeB2WPkSgX8ZLLXf5"
+ADMIN_PW = os.environ.get("ADMIN_PASSWORD") or dotenv_values("/app/backend/.env").get("ADMIN_PASSWORD", "")
 TARGET = "omar@bytetalks.app"  # demo user to suspend/restore
 
 

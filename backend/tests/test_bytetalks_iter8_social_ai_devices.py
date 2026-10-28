@@ -15,7 +15,7 @@ load_dotenv("/app/frontend/.env")
 BASE = (os.environ.get("EXPO_BACKEND_URL") or os.environ["EXPO_PUBLIC_BACKEND_URL"]).rstrip("/") + "/api"
 db = MongoClient(os.environ["MONGO_URL"])[os.environ["DB_NAME"]]
 PW = "ByteTalks123!"
-ADMIN = ("admin@bytetalks.app", "D3WjHmkeB2WPkSgX8ZLLXf5")
+ADMIN = (os.environ.get("ADMIN_EMAIL", "admin@bytetalks.app"), os.environ.get("ADMIN_PASSWORD", ""))
 MATCH = "6ae148878ee7eecde617a089"
 TEST_EMAIL = "test_iter8_devices@bytetalks.app"
 

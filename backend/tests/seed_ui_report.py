@@ -9,7 +9,7 @@ def lg(e, p="ByteTalks123!"):
     return {"Authorization": "Bearer " + r.json()["token"]}, r.json()["user"]
 
 
-A, _ = lg("admin@bytetalks.app", "D3WjHmkeB2WPkSgX8ZLLXf5")
+A, _ = lg("admin@bytetalks.app", __import__("dotenv").dotenv_values("/app/backend/.env").get("ADMIN_PASSWORD", ""))
 L, _ = lg("leo@bytetalks.app")
 N, lena = lg("lena@bytetalks.app")
 print("lena", lena["id"], lena["status"])
