@@ -1,0 +1,52 @@
+{
+  "summary": "Iteration 3: tested moderation/admin, restricted-account flow, RevenueCat premium (Test Store), likes gate, dark+red theme, and backend regression after real email was turned on. Backend: new moderation suite 13/13 passed. Admin endpoints return 403 for non-admins. Restricted users get 403 ACCOUNT_RESTRICTED on discover, matches and swipes, but 200 on /me, /appeals and /me/export. Suspended users and the admin are excluded from discover. Report -> suspend/ban -> appeal -> approve/deny works and is written to the audit log. Legacy suites were adapted for real email: they no longer use dev_code and create users directly in Mongo. Results: api 11/12 and security+iter2 5/5 (each run on its own; see note). The one failure is the register flow: the Emergent email provider rate-limits sends (429 rate_limited), and the backend turns that into HTTP 502, which Cloudflare replaces with its own HTML page. Frontend: the theme is dark+red everywhere (no cyan found in code or screenshots). Non-premium likes gate works (blurred cards, tap goes to /premium). Premium screen has the simulated banner and packages in order monthly/three_month/annual. The confirm sheet leads to the RevenueCat Test Store dialog. Cancel and a valid purchase both work; after purchase Likes un-blurs and Same Goals opens without a paywall; Restore doesn't crash; premium-active and Done work on re-entry. Free user's 2nd super-like is blocked and routes to /premium. Admin lands on /admin with stats and tabs; suspend through the sheet worked and admin-empty showed afterwards. Suspended Lena was sent to /restricted with her reason, sent an appeal (restricted-appeal-open shown), admin approved it in the Appeals tab, and recheck took her to /discover. Deprecated packages detected: expo-router/unstable-native-tabs (console says use expo-router/native-tabs).",
+  "backend_issues": {
+    "critical": [],
+    "minor": [
+      {"endpoint": "POST /api/auth/register, /auth/resend-code, /auth/forgot-password", "issue": "When the Emergent email provider returns 429 {code:'rate_limited'} (seen after a few quick sends), send_email raises HTTPException(502). Cloudflare swaps the 502 body for its own HTML 'Bad gateway' page, so the app can only show the generic 'Something went wrong'. Fix: map rate_limited to 429 (or 503) with a clear 'try again in a minute' detail, and never use 502. Also seen: 422 'Undeliverable recipient' (e.g. forgot-password for @bytetalks.app demo users) also becomes 502."},
+      {"endpoint": "POST /api/appeals", "issue": "After an appeal is denied, the restricted user can send unlimited new appeals: the backend only blocks while one is open, and restricted.tsx shows the input again. The spec says 'one appeal'. Confirm the intended policy; if it's one per restriction, block re-appeal after a denial."},
+      {"endpoint": "DELETE /api/me + /api/admin/reports", "issue": "Open reports against deleted accounts stay in the queue as 'Deleted user'. Only dismiss works (suspend/ban gives 404). Auto-close a user's reports when they delete their account."},
+      {"endpoint": "PUT /api/me/public-key", "issue": "Restricted users get 403 on login when the client uploads its E2EE key, which leaves console noise and triggers a router.replace. Harmless, but either allow-list it or skip the upload when restricted."}
+    ]
+  },
+  "frontend_issues": {
+    "ui_bugs": [
+      {"component": "premium.tsx / src/revenuecat.tsx", "issue": "After a successful Test Store 'Test valid purchase', the premium screen kept showing the packages and Continue for 8+ seconds; premium-active didn't appear. It did show on re-entry. purchaseMutation/restoreMutation never write the returned customerInfo into the ['revenuecat','customer-info'] query cache and rely only on the update listener. Add onSuccess: queryClient.setQueryData(['revenuecat','customer-info'], info) for both.", "testID": "premium-active", "priority": "MEDIUM"},
+      {"component": "src/api.ts:37 global ACCOUNT_RESTRICTED redirect", "issue": "When a restricted user deep-links to /discover, a red error toast appears: \"The action 'ROUTE_NAMES_CHANGED'... was not handled\". The redirect to /restricted still works. router.replace('/restricted') is called from parse() while the tabs navigator is mounting or already on /restricted. Guard it: skip if already on /restricted, and defer until navigation is ready.", "testID": "restricted-screen", "priority": "MEDIUM"},
+      {"component": "likes.tsx locked cards", "issue": "Locked (non-premium) like cards blur the photo but still show the name, age and match reason (e.g. 'Noah, 32 · You both speak English'). That weakens the 'See who likes you' premium gate. Hide or blur the name for locked cards.", "testID": "like-card-locked-*", "priority": "LOW"}
+    ],
+    "integration_issues": [
+      {"flow": "Sign-up when the email provider is rate-limited", "issue": "Register returns a Cloudflare HTML 502, so the signup screen shows the generic 'Something went wrong. Please try again.' instead of an actionable message.", "affected_testIDs": ["signup-submit-button"]}
+    ],
+    "design_issues": [
+      {"screen": "admin.tsx", "issues": ["Report reason shown raw in snake_case ('fake_profile'). Map it to a label like 'Fake profile'.", "Days input and note input in the action sheet have no visible label once filled; '7' alone isn't clear. Add 'Suspend for (days)' and 'Note to user' labels."]},
+      {"screen": "profile.tsx premium row", "issue_note": "minor", "issues": ["Row still says 'See who likes you, unlimited likes & more' for users who already have Premium. Show 'Premium active'."]}
+    ],
+    "react_native_issues": [
+      {"component": "expo-router/unstable-native-tabs", "issue": "Deprecated import; console warns '`expo-router/unstable-native-tabs` is deprecated. Use `expo-router/native-tabs` instead.' Reference: /app/frontend/app/(tabs)/_layout.tsx:3"}
+    ]
+  },
+  "test_report_links": ["/app/backend/tests/test_bytetalks_moderation.py", "/app/backend/tests/test_bytetalks_api.py", "/app/backend/tests/test_bytetalks_security.py", "/app/backend/tests/test_bytetalks_iter2_fixes.py", "/app/backend/tests/seed_ui_report.py", "/app/test_reports/pytest/pytest_iter3.xml"],
+  "action_items": [
+    "server.py send_email: map provider 429 'rate_limited' to HTTPException(429, 'Too many emails right now, try again in a minute') and undeliverable 422 to 400. Avoid 502, because Cloudflare replaces the body.",
+    "revenuecat.tsx: in purchase/restore onSuccess, write the returned customerInfo into the query cache so premium-active shows right after purchase.",
+    "api.ts: guard the global router.replace('/restricted') (skip if already there; defer until navigation is ready) to stop the ROUTE_NAMES_CHANGED error toast.",
+    "(tabs)/_layout.tsx: migrate from expo-router/unstable-native-tabs to expo-router/native-tabs.",
+    "Decide the appeal policy after a denial (one appeal vs unlimited) and enforce it in POST /api/appeals and restricted.tsx.",
+    "Hide names on locked like cards; label raw report reasons and the sheet inputs in admin.tsx.",
+    "Auto-resolve reports against deleted users."
+  ],
+  "critical_code_review_comments": [
+    "Daily like/super-like limits (src/limits.ts) are counted per device, not per user: the key isn't scoped by user id, so accounts on the same device share counts. The day is taken from UTC (toISOString), so it resets at UTC midnight. Usage is recorded before the /swipes call, so a failed request still uses up quota. Anyone can bypass the limits via the API. Client-side gating is by design, but scope the key by user id and use the local date.",
+    "server.py is 1222 lines; split it into routers (auth, profile, discover, chat, moderation).",
+    "RevenueCat identifies the admin account and restricted users as subscribers; RC identify returned 429 during rapid logins. Consider skipping the RC login for role=admin.",
+    "issue_code falls back to returning dev_code only when the key is missing (send_email returns False), and provider failures raise errors, so there's no code leak in production. Good."
+  ],
+  "updated_files": ["/app/backend/tests/test_bytetalks_api.py (removed dev_code dependency; users inserted/verified directly in Mongo; register test uses delivered+...@resend.dev)", "/app/backend/tests/test_bytetalks_moderation.py (new)", "/app/backend/tests/seed_ui_report.py (new helper)"],
+  "success_rate": {"backend": "97% (29/30; only the register flow fails, due to the email provider 429 -> 502)", "frontend": "95% (all requested flows pass; 2 medium UX bugs)"},
+  "seed_data_creation": "Inserted 'like' swipes from ava, zara, kai, noah, ethan, sofia to leo (so Leo's Likes grid has 6 entries). Leo now has an active simulated RevenueCat 'pro' entitlement (monthly test purchase). Noah used his 1 free super-like today (on Lena). Lena was suspended through the admin UI, then reinstated through an approved appeal (status active). Omar was suspended/banned by pytest, then reset to active. TEST_ appeals/reports were cleaned up; audit log keeps the entries.",
+  "retest_needed": true,
+  "should_main_agent_self_test": true,
+  "context_for_next_testing_agent": "Run pytest with -n0 (serial), and restart the backend between suites. The login limit is 10 per 5 min per real public IP (XFF private IPs are ignored), and test_bytetalks_security deliberately trips it, so the other suites must not run in the same window. The email provider rate-limits quickly, so test_register_verify_login_flow may fail with 502 for a few minutes after other sends. Leo is now Premium, so use another demo user (e.g. noah, maya) to test the non-premium likes gate. In the RevenueCat Test Store dialog on web, buttons are 'Test valid purchase' / 'Test failed purchase' / 'Cancel'. The welcome screen fades in, so wait ~2.5s before clicking welcome-sign-in.",
+  "rca_of_issue": "Register 502: the backend log shows 'Email send failed: 429 {code: rate_limited}'. send_email only maps insufficient_credits/integration_disabled/daily_limit_reached to 503; everything else raises 502, and Cloudflare intercepts origin 502s."
+}

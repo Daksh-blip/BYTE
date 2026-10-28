@@ -2,6 +2,26 @@
 import io, os, uuid, random, base64
 import pytest, requests
 from PIL import Image
+from pymongo import MongoClient
+from dotenv import dotenv_values
+
+_env = dotenv_values("/app/backend/.env")
+DB = MongoClient(_env["MONGO_URL"])[_env["DB_NAME"]]
+
+
+def make_user_in_db(email, name):
+    # Emergent email provider rate-limits rapid sends (429 -> 502), so regression users are inserted directly
+    # (password hash copied from a seed account, all seeds use PW). Only test_register_verify_login_flow hits /register.
+    import sys; sys.path.insert(0, "/app/backend")
+    from server import User
+    doc = User(email=email, password_hash=DB.users.find_one({"email": "leo@bytetalks.app"})["password_hash"], name=name).to_mongo()
+    doc["verified"] = True
+    DB.users.insert_one(doc)
+
+
+def verify_in_db(email):
+    # real email is on (no dev_code) -> mark verified directly in Mongo for automated tests
+    DB.users.update_one({"email": email}, {"$set": {"verified": True}})
 
 BASE_URL = os.environ.get("EXPO_PUBLIC_BACKEND_URL").rstrip("/")
 API = f"{BASE_URL}/api"
@@ -21,11 +41,9 @@ def jpeg():
 
 def signup(gender, interested, dob="1995-05-05", onboard=True):
     s = sess()
-    email = f"test_{uuid.uuid4().hex[:8]}@example.com"
-    r = s.post(f"{API}/auth/register", json={"email": email, "password": PW, "name": "TEST_" + gender})
-    assert r.status_code == 200, r.text
-    code = r.json()["dev_code"]
-    r = s.post(f"{API}/auth/verify-email", json={"email": email, "code": code})
+    email = f"delivered+test_{uuid.uuid4().hex[:8]}@resend.dev"
+    make_user_in_db(email, "TEST_" + gender)
+    r = s.post(f"{API}/auth/login", json={"email": email, "password": PW})
     assert r.status_code == 200, r.text
     s.headers["Authorization"] = f"Bearer {r.json()['token']}"
     me = r.json()["user"]
@@ -60,26 +78,22 @@ def trio():
 # ---- Auth
 class TestAuth:
     def test_register_verify_login_flow(self):
-        s = sess(); email = f"test_{uuid.uuid4().hex[:8]}@example.com"
+        s = sess(); email = f"delivered+test_{uuid.uuid4().hex[:8]}@resend.dev"
         r = s.post(f"{API}/auth/register", json={"email": email, "password": PW, "name": "TEST_A"})
-        assert r.status_code == 200 and len(r.json()["dev_code"]) == 6
+        assert r.status_code == 200 and r.json().get("email_sent") is True and "dev_code" not in r.json()
         # unverified login -> 403
         r = s.post(f"{API}/auth/login", json={"email": email, "password": PW})
         assert r.status_code == 403 and r.json()["detail"] == "EMAIL_NOT_VERIFIED"
-        r = s.post(f"{API}/auth/resend-code", json={"email": email})
-        code = r.json()["dev_code"]
-        assert s.post(f"{API}/auth/verify-email", json={"email": email, "code": "000000" if code != "000000" else "111111"}).status_code == 400
-        r = s.post(f"{API}/auth/verify-email", json={"email": email, "code": code})
+        assert s.post(f"{API}/auth/verify-email", json={"email": email, "code": "000000"}).status_code == 400
+        verify_in_db(email)
+        r = s.post(f"{API}/auth/login", json={"email": email, "password": PW})
         assert r.status_code == 200 and r.json()["token"] and r.json()["user"]["email"] == email
         assert s.post(f"{API}/auth/login", json={"email": email, "password": "wrongpass1"}).status_code == 401
-        # forgot / reset
+        # forgot-password sends real email, no dev_code leak
         r = s.post(f"{API}/auth/forgot-password", json={"email": email})
-        rc = r.json()["dev_code"]
-        r = s.post(f"{API}/auth/reset-password", json={"email": email, "code": rc, "password": "NewPass123!"})
-        assert r.status_code == 200
-        assert s.post(f"{API}/auth/login", json={"email": email, "password": "NewPass123!"}).status_code == 200
-        assert s.post(f"{API}/auth/login", json={"email": email, "password": PW}).status_code == 401
-        tok = s.post(f"{API}/auth/login", json={"email": email, "password": "NewPass123!"}).json()["token"]
+        assert r.status_code == 200 and "dev_code" not in r.json()
+        assert s.post(f"{API}/auth/reset-password", json={"email": email, "code": "000000", "password": "NewPass123!"}).status_code == 400
+        tok = r = s.post(f"{API}/auth/login", json={"email": email, "password": PW}).json()["token"]
         assert s.delete(f"{API}/me", headers={"Authorization": f"Bearer {tok}"}).status_code == 200
 
     def test_duplicate_register(self):
@@ -126,7 +140,10 @@ class TestProfile:
             noauth = requests.get(full.split("?")[0])
             assert noauth.status_code == 401
             tok = s.headers["Authorization"].split()[1]
-            ok = requests.get(full.split("?")[0], params={"token": tok})
+            # Session tokens are not accepted in URLs any more; only the short-lived photo-only media token is.
+            assert requests.get(full.split("?")[0], params={"token": tok}).status_code == 401
+            mtok = s.get(f"{API}/me/media-token").json()["token"]
+            ok = requests.get(full.split("?")[0], params={"token": mtok})
             assert ok.status_code == 200 and ok.headers["content-type"].startswith("image/")
             r = s.delete(f"{API}/me/photos/{last}")
             assert len(r.json()["photos"]) == 5 and s.get(f"{API}/me").json()["photos"].__len__() == 5
@@ -164,13 +181,21 @@ class TestDating:
         # third user object-level auth
         assert c.get(f"{API}/matches/{mid}/messages").status_code == 404
         assert c.get(f"{API}/matches/{mid}").status_code == 404
-        assert a.put(f"{API}/me/public-key", json={"public_key": "k" * 44}).status_code == 200
-        assert b.put(f"{API}/me/public-key", json={"public_key": "j" * 44}).status_code == 200
-        msg = {"ciphertext": base64.b64encode(b"x" * 40).decode(), "nonce": base64.b64encode(b"n" * 24).decode(),
-               "sender_public_key": "k" * 44, "recipient_public_key": "j" * 44, "plaintext": "SECRET"}
-        # Mismatched keys must be rejected (no silent send to a stale key)
-        bad = dict(msg, recipient_public_key="z" * 44)
-        assert a.post(f"{API}/matches/{mid}/messages", json=bad).status_code == 409
+        # Legacy NaCl sends are retired: no downgrade path
+        legacy = {"ciphertext": base64.b64encode(b"x" * 40).decode(), "nonce": base64.b64encode(b"n" * 24).decode(),
+                  "sender_public_key": "k" * 44, "recipient_public_key": "j" * 44}
+        assert a.post(f"{API}/matches/{mid}/messages", json=legacy).status_code == 422
+        assert a.get(f"{API}/matches/{mid}").json()["protocol"] == "signal-v1"
+        # Enroll Signal devices (server stores public material only; crypto is verified client-side)
+        def enroll(s, ch):
+            ident = {"version": 1, "x25519PublicKey": ch * 43 + "=", "ed25519PublicKey": ch * 43 + "="}
+            dev = s.post(f"{API}/signal/identity", json={"deviceId": 1, "identity": ident, "registrationId": 42}).json()["device"]
+            s.headers["X-Signal-Device"] = dev
+            return dev
+        dev_a, dev_b = enroll(a, "k"), enroll(b, "j")
+        msg = {"protocol": "signal-v1", "ciphertext": base64.b64encode(b"x" * 40).decode(), "recipient_device": dev_b, "plaintext": "SECRET"}
+        # Wrong recipient device must be rejected (no silent send to a stale device)
+        assert a.post(f"{API}/matches/{mid}/messages", json=dict(msg, recipient_device=dev_a)).status_code == 409
         r = a.post(f"{API}/matches/{mid}/messages", json=msg)
         assert r.status_code == 200 and "plaintext" not in r.json()
         assert c.post(f"{API}/matches/{mid}/messages", json=msg).status_code == 404

@@ -7,7 +7,7 @@
     "icon": "./assets/images/icon.png",
     "scheme": "bytetalks",
     "userInterfaceStyle": "dark",
-    "backgroundColor": "#090A0F",
+    "backgroundColor": "#0A0607",
     "ios": {
       "supportsTablet": true,
       "bundleIdentifier": "com.emergent.meetbypersonality.n45jnb",
@@ -19,7 +19,7 @@
     "android": {
       "adaptiveIcon": {
         "foregroundImage": "./assets/images/adaptive-icon.png",
-        "backgroundColor": "#090A0F"
+        "backgroundColor": "#0A0607"
       },
       "package": "com.emergent.meetbypersonality.n45jnb"
     },
@@ -36,7 +36,7 @@
           "image": "./assets/images/splash-image.png",
           "imageWidth": 200,
           "resizeMode": "contain",
-          "backgroundColor": "#090A0F"
+          "backgroundColor": "#0A0607"
         }
       ],
       "expo-font",
@@ -52,7 +52,13 @@
         }
       ],
       "@react-native-vector-icons/ionicons",
-      "expo-sharing"
+      "expo-sharing",
+      [
+        "expo-sqlite",
+        {
+          "useSQLCipher": true
+        }
+      ]
     ],
     "experiments": {
       "typedRoutes": true

@@ -15,6 +15,9 @@ export default function Index() {
     );
   }
   if (!user) return <Redirect href="/welcome" />;
+  if (user.role === "admin") return <Redirect href="/admin" />;
+  const restricted = user.status === "banned" || (user.status === "suspended" && !!user.suspended_until && new Date(user.suspended_until) > new Date());
+  if (restricted) return <Redirect href="/restricted" />;
   if (!user.onboarded) return <Redirect href="/onboarding" />;
   return <Redirect href="/discover" />;
 }

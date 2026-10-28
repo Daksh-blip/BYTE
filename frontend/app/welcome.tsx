@@ -47,6 +47,9 @@ export default function Welcome() {
           <Button testID="welcome-create-account" title="Create account" onPress={() => router.push("/auth/signup")} />
           <Button testID="welcome-sign-in" title="I already have an account" variant="secondary" onPress={() => router.push("/auth/login")} />
           <Text style={s.legal}>By continuing you confirm you are 18+ and agree to our Terms and Privacy Policy.</Text>
+          <Text testID="welcome-founder" style={s.founder}>
+            Created by Daksh Mishra · Founder
+          </Text>
         </Animated.View>
       </View>
     </View>
@@ -67,4 +70,5 @@ const useStyles = makeStyles((c) => ({
   pointText: { color: c.onSurfaceSecondary, fontSize: font.base, fontWeight: "500" },
   actions: { gap: spacing.md },
   legal: { color: c.muted, fontSize: font.sm, textAlign: "center", lineHeight: 18 },
+  founder: { color: c.onSurfaceSecondary, fontSize: font.sm, textAlign: "center", fontWeight: "600", letterSpacing: 0.5 },
 }));

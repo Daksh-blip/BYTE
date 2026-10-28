@@ -101,3 +101,7 @@
 #====================================================================================================
 # Testing Data - Main Agent and testing sub agent both should log testing data below this section
 #====================================================================================================
+## Session 2 (fork) — Phase 1 password fixes + Signal Protocol migration
+- Main agent: Reset email pre-fill now uses an in-memory notice (src/auth-notice.ts) read with useFocusEffect in login.tsx. Global 401 handler is in src/api.ts and src/auth.tsx.
+- Signal Protocol: src/signal/* and backend /api/signal/*. Legacy chats are read-only until upgraded.
+- Self-tests passed: frontend/tests/signal_e2e.mjs (25/25), backend pytest api (11/11, register test skipped due to the email rate limit), signal_migration (3/3), passwords (13/13), pw_iter5 (11/11).

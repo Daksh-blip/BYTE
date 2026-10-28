@@ -10,9 +10,10 @@ import { useAuth } from "@/src/auth";
 import { usesNativeTabs } from "@/src/navigation";
 import { makeStyles, useTheme, spacing, radius, font } from "@/src/theme";
 
-type Row = { icon: React.ComponentProps<typeof Ionicons>["name"]; label: string; sub: string; href: "/edit-profile" | "/settings" | "/safety" | "/blocked"; testID: string };
+type Row = { icon: React.ComponentProps<typeof Ionicons>["name"]; label: string; sub: string; href: "/edit-profile" | "/settings" | "/safety" | "/blocked" | "/premium"; testID: string };
 
 const ROWS: Row[] = [
+  { icon: "sparkles", label: "BYTE TALKS Premium", sub: "See who likes you, unlimited likes & more", href: "/premium", testID: "profile-premium-row" },
   { icon: "create-outline", label: "Edit profile", sub: "Photos, bio, interests & preferences", href: "/edit-profile", testID: "profile-edit-row" },
   { icon: "shield-checkmark-outline", label: "Safety center", sub: "Dating tips and how we protect you", href: "/safety", testID: "profile-safety-row" },
   { icon: "ban-outline", label: "Blocked people", sub: "Manage who you've blocked", href: "/blocked", testID: "profile-blocked-row" },
@@ -60,6 +61,13 @@ export default function ProfileTab() {
             <Text style={s.compSub}>{pct < 100 ? "Add more photos and details to get better matches." : "Looking great! Your profile is complete."}</Text>
           </View>
         </View>
+
+        {user.status === "warned" ? (
+          <View style={s.paused} testID="profile-warning-banner">
+            <Ionicons name="warning" size={20} color={colors.warning} />
+            <Text style={s.pausedText}>A moderator warned your account: {user.status_reason}. Please review the community guidelines in the Safety center.</Text>
+          </View>
+        ) : null}
 
         {user.paused ? (
           <View style={s.paused} testID="profile-paused-banner">

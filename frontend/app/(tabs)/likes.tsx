@@ -8,6 +8,8 @@ import Ionicons from "@react-native-vector-icons/ionicons";
 
 import { api, photoSource, Profile } from "@/src/api";
 import { usesNativeTabs } from "@/src/navigation";
+import { useSubscription } from "@/src/revenuecat";
+import { BlurView } from "expo-blur";
 import { Button, EmptyState } from "@/src/components/ui";
 import { makeStyles, useTheme, spacing, radius, font } from "@/src/theme";
 
@@ -20,6 +22,8 @@ export default function Likes() {
   const [items, setItems] = useState<Profile[] | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [refreshing, setRefreshing] = useState(false);
+  const { isSubscribed } = useSubscription();
+  const locked = !isSubscribed;
 
   const load = useCallback(async () => {
     try {
@@ -72,15 +76,32 @@ export default function Likes() {
               }}
             />
           }
-          ListHeaderComponent={items?.length ? <Text style={s.sub}>These people already like you. Like them back to match instantly.</Text> : undefined}
+          ListHeaderComponent={
+            items?.length ? (
+              locked ? (
+                <View style={s.gate} testID="likes-premium-gate">
+                  <Text style={s.gateTitle}>{items.length} {items.length === 1 ? "person likes" : "people like"} you</Text>
+                  <Text style={s.sub}>Go Premium to see who they are, or keep swiping — when you like them back in Discover, you&apos;ll match.</Text>
+                  <Button testID="likes-go-premium" title="See who likes you" icon="sparkles" onPress={() => router.push("/premium")} />
+                </View>
+              ) : (
+                <Text style={s.sub}>These people already like you. Like them back to match instantly.</Text>
+              )
+            ) : undefined
+          }
           ListEmptyComponent={<EmptyState testID="likes-empty" icon="heart-outline" title="No likes yet" body="Keep swiping — when someone likes you, they'll show up here." />}
           renderItem={({ item }) => (
             <Pressable
               testID={`like-card-${item.id}`}
               style={s.card}
-              onPress={() => router.push({ pathname: "/user/[userId]", params: { userId: item.id, actions: "1" } })}
+              onPress={() => (locked ? router.push("/premium") : router.push({ pathname: "/user/[userId]", params: { userId: item.id, actions: "1" } }))}
             >
               <Image source={photoSource(item.photos[0]?.url)} style={s.img} contentFit="cover" transition={200} />
+              {locked ? (
+                <BlurView intensity={60} tint="dark" style={s.blur} testID={`like-card-locked-${item.id}`}>
+                  <Ionicons name="lock-closed" size={22} color={colors.onSurface} />
+                </BlurView>
+              ) : null}
               {item.superlike ? (
                 <View style={s.superBadge}>
                   <Ionicons name="star" size={12} color={colors.onBrandSecondary} />
@@ -94,10 +115,10 @@ export default function Likes() {
               ) : null}
               <LinearGradient colors={[colors.scrimClear, colors.scrim]} style={s.scrim}>
                 <Text style={s.name} numberOfLines={1}>
-                  {item.name}
-                  {item.age ? `, ${item.age}` : ""}
+                  {locked ? "Someone" : item.name}
+                  {!locked && item.age ? `, ${item.age}` : ""}
                 </Text>
-                {item.note ? (
+                {locked ? null : item.note ? (
                   <Text testID={`like-note-${item.id}`} style={s.note} numberOfLines={2}>
                     “{item.note}”
                   </Text>
@@ -133,4 +154,7 @@ const useStyles = makeStyles((c) => ({
   demoBadge: { position: "absolute", top: spacing.sm, right: spacing.sm, backgroundColor: c.overlay, borderRadius: radius.pill, paddingHorizontal: spacing.sm, paddingVertical: 2 },
   demoText: { color: c.warning, fontSize: 11, fontWeight: "700" },
   note: { color: c.onSurfaceSecondary, fontSize: font.sm, marginTop: 2 },
+  blur: { position: "absolute", top: 0, left: 0, right: 0, bottom: 0, alignItems: "center", justifyContent: "center" },
+  gate: { backgroundColor: c.surfaceSecondary, borderRadius: radius.md, padding: spacing.lg, gap: spacing.sm, marginBottom: spacing.lg, borderWidth: 1, borderColor: c.brandSecondary },
+  gateTitle: { color: c.onSurface, fontSize: font.xl, fontWeight: "800" },
 }));

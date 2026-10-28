@@ -1,0 +1,32 @@
+{
+  "summary": "Tested the requested frontend flows on web preview (390x844) with real browser contexts and Mongo checks. PASS: founder credit on Welcome and Settings; password reset (invalid code shows 'Incorrect or expired code' and no notice; with a valid code you land on /auth/login with the email pre-filled from the server, an EMPTY password, a green notice and no email in the URL; the new password works and the old one fails); auto-logout on revocation (sofia was redirected to login with a red notice after a password change made through the API, triggered by tapping the Chats tab); Signal chat maya<->leo in two contexts (both show 'Active on this device', A->B and B->A delivered in under 6s, label 'Signal Protocol · end-to-end encrypted', DB docs are protocol signal-v1 with no plaintext, own message survives reload); info sheet shows the protocol text and a 60-digit safety number; legacy upgrade (placeholder text, Legacy tag, header label, upgrade card -> system row + composer, legacy doc unchanged). BUG FOUND AND FIXED: the sender saw every sent message twice (one stuck on 'Sending…'). BUGS REPORTED: (1) race in the devices sheet; (2) no auth guard on deep links when signed out.",
+  "backend_issues": {"critical": [], "minor": []},
+  "frontend_issues": {
+    "ui_bugs": [
+      {"component": "Chat send (app/chat/[matchId].tsx)", "issue": "FIXED BY TESTER. After a successful send, the optimistic tmp- row was never removed, and loadMessages kept every pending row ((prev).filter(r => r.pending)). The sender therefore saw the message twice, with one copy stuck on 'Sending…' until the screen remounted. Fix: loadMessages(dropId) leaves out the temp row once the server copy is loaded. Verified: count=1 and no 'Sending…'.", "testID": "chat-send-button", "priority": "HIGH"},
+      {"component": "Devices sheet (app/settings.tsx openDevices)", "issue": "Race: after a full page load, if the sheet opens while Signal is still starting (status 'Setting up secure chat…'), the X-Signal-Device header is not set yet. GET /signal/devices then returns current=false for every device, so this device has no 'This device' label and shows a 'Remove' button. Tapping it would revoke the user's own active device, because the backend's self-revoke check compares against an empty header. Works correctly once the status shows Active.", "testID": "settings-devices-row", "priority": "MEDIUM"}
+    ],
+    "integration_issues": [
+      {"flow": "Signed-out deep links", "issue": "There is no auth guard on the (tabs) layout or on /settings. Opening /discover while signed out (including a reload right after an auto-logout) shows 'Connection lost / Not authenticated', and /settings shows 'Setting up secure chat on this device…' forever. The 401 handler doesn't redirect when there is no token. Only index.tsx redirects.", "affected_testIDs": ["tab-discover", "settings-screen"]}
+    ],
+    "design_issues": [],
+    "react_native_issues": []
+  },
+  "test_report_links": ["/app/backend/tests/ui_helpers.py"],
+  "action_items": [
+    "Review the tester's fix in app/chat/[matchId].tsx (loadMessages(dropId) in send) for sender-side duplicate messages.",
+    "Devices sheet: wait for Signal to be ready (device id set) before fetching /signal/devices, or disable the row while status is 'Setting up'. Backend: refuse DELETE /signal/devices/{id} when the X-Signal-Device header is missing, so a user can't revoke their own device by accident.",
+    "Add an auth guard (redirect to /welcome when user is null) in app/(tabs)/_layout.tsx and on the other protected screens (settings, chat, edit-profile, etc.)."
+  ],
+  "critical_code_review_comments": [
+    "server.py is 1565 lines, which is over the 700-line guideline. Split it into routers (auth, signal, matches, admin).",
+    "In auth.tsx the AppState foreground /me check swallows errors. That's fine because the 401 handler takes over, but nothing protects routes when the user is null."
+  ],
+  "updated_files": ["/app/frontend/app/chat/[matchId].tsx", "/app/backend/tests/ui_helpers.py"],
+  "success_rate": {"backend": "N/A (frontend-only request)", "frontend": "~92% (12/13 checks pass; devices 'This device' label fails only in the race window; duplicate-message bug fixed)"},
+  "seed_data_creation": "Created a maya<->leo match (_id 6ae148878ee7eecde617a089, protocol signal-v1) with TEST_ messages; left in place for future chat tests. The legacy maya<->noah match and its message were created and cleaned up. ethan's and sofia's passwords were reverted to ByteTalks123! (verified by login).",
+  "retest_needed": true,
+  "should_main_agent_self_test": true,
+  "context_for_next_testing_agent": "Use /app/backend/tests/ui_helpers.py (setcode, ensure_match, legacy_setup/check/cleanup, msgs, change_pw, login). IDs are ObjectId _id strings. Login rate limit: restart the backend on 429. Use browser.new_context() from page.context.browser for a second user. Screenshots for extra pages need a .jpg path when quality is set.",
+  "rca_of_issue": "Duplicate message: send() adds a {pending:true} temp row; on success it calls loadMessages(), which merges server rows with prev.filter(r => r.pending), so the temp row is kept forever. Devices race: api.ts only adds X-Signal-Device after startSignal() calls setSignalDevice(); settings opens the sheet without waiting for that."
+}

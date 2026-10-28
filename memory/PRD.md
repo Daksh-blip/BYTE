@@ -33,8 +33,15 @@ Build BYTE TALKS: a privacy-first, conversation-first dating platform for adults
 - Backend tests: `/app/backend/tests/` — 17 tests pass.
 
 ## Backlog
+### Done (Oct 2026, session 2)
+- Password-reset email pre-fill (server-confirmed, in-memory hand-off) and global 401 auto-logout plus a foreground session check.
+- Server-enforced revocation: `pw_version` and `jti` checked on every request, compare-and-swap password change, generic security emails, photo-only media tokens in URLs.
+- Signal Protocol (`@open-e2ee/signal-protocol-sdk` 13.3) on our own FastAPI relay. New chats use Signal; legacy chats keep their old messages readable and can be upgraded explicitly (one-way). Key-change warnings, safety number + verify, device list and removal in Settings.
+- Founder credit "Created by Daksh Mishra" on the Welcome and Settings screens.
+- Tests: `frontend/tests/signal_e2e.mjs` (25 checks with two real SDK clients through the backend) and `backend/tests/test_bytetalks_signal_migration.py`.
 ### P0
-- Signal Protocol (forward secrecy, prekeys, Double Ratchet) and secure multi-device linking.
+- Secure multi-device linking and history transfer (today: one Signal device per account).
+- Independent security review of the Signal integration.
 - Real email delivery once the Emergent email key is provisioned.
 - Admin/moderation dashboard (report queue, suspend/ban, appeals, audit log).
 ### P1

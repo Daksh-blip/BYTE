@@ -1,0 +1,49 @@
+{
+  "summary": "Iteration 5 retest of password fixes. Backend: 29/29 pass. That is 13 in test_bytetalks_passwords.py (1 assertion updated to the unified message), 11 in the new test_bytetalks_pw_iter5.py and 5 in the rate-limit suite. pw_version revocation works: tokens issued <1s before a change-password or reset now get 401, the new token works, and older users without the field are treated as version 0. reset-password and verify-email return the same 'Incorrect or expired code' for unknown email, no code, wrong code and expired code. forgot-password gives the same body for both cases and similar timing (0.14s vs 0.12s), and the background task does create the code. Multi-byte passwords over 72 bytes get 400 on register, reset and change; exactly 72 bytes is accepted; login with an over-long password gives 401, not 500. Frontend: 'Current password is incorrect' now shows under change-password-current-error. Other server errors show under the new-password field. A successful change shows a toast and the user stays signed in after reload. After a successful reset the app returns to a single login screen and the reset screen has a working resend button. Sheet content is now scrollable. Regressions pass: login wrong-password inline error, eye toggle, signup short-password error. Still broken: login email pre-fill after reset (it is in the URL but not in the input), and the app does not handle a revoked session.",
+  "backend_issues": {
+    "critical": [],
+    "minor": [
+      {"endpoint": "POST /api/auth/forgot-password", "issue": "asyncio.create_task(_send()) keeps no reference to the task, so the event loop may garbage-collect it before it finishes (the Python docs warn about this). Keep it in a set, or use FastAPI BackgroundTasks."},
+      {"endpoint": "POST /api/me/password", "issue": "The new token uses me.pw_version + 1 from the user loaded before the update. If two changes run at once, a token can carry the wrong version. Use find_one_and_update(return_document=AFTER) and sign the token with the stored pw_version."},
+      {"endpoint": "consume_code (reset/verify)", "issue": "After 5 wrong attempts the message becomes 'Too many wrong attempts', which only happens for an existing email with a pending code. This is a small account-enumeration leak. Optional fix: return the uniform message or a 429."}
+    ]
+  },
+  "frontend_issues": {
+    "ui_bugs": [
+      {"component": "auth/login.tsx email pre-fill", "issue": "After a successful reset, dismissTo goes back to the existing login screen with ?email=... in the URL, but login-email-input stays empty. useState(params.email ?? '') only runs on first mount and the login screen is reused. Reproduce: Welcome > Sign in, leave email empty > Forgot password > reset > login email is ''. Fix: useEffect(() => { if (params.email) setEmail(params.email) }, [params.email]). Reference: /app/frontend/app/auth/login.tsx:13", "testID": "login-email-input", "priority": "MEDIUM"},
+      {"component": "auth/login.tsx stale state after reset", "issue": "If the user tried a wrong password before going to Forgot, the reused login screen still shows the old password and the 'Invalid email or password' error after the reset succeeds. Clear password and error when params.email changes.", "testID": "login-password-input-error", "priority": "LOW"}
+    ],
+    "integration_issues": [
+      {"flow": "Session revoked by a password change on another device", "issue": "auth.tsx only handles 401 at startup: it removes the token and sets user to null, but there is no redirect. Visiting /settings after the token was revoked shows the Settings screen with an empty Email row instead of sending the user to Welcome/Login. During a session, 401 responses from the API never sign the user out. Add a global 401 handler in src/api that calls signOut and routes to /welcome, plus an auth guard on protected routes (settings, edit-profile, premium, chat, user).", "affected_testIDs": ["settings-screen", "settings-email"]}
+    ],
+    "design_issues": [],
+    "react_native_issues": []
+  },
+  "test_report_links": [
+    "/app/backend/tests/test_bytetalks_passwords.py",
+    "/app/backend/tests/test_bytetalks_pw_iter5.py",
+    "/app/backend/tests/test_bytetalks_password_ratelimits.py",
+    "/app/test_reports/pytest/iter5_passwords.xml",
+    "/app/test_reports/pytest/iter5_new.xml",
+    "/app/test_reports/pytest/iter5_rl.xml"
+  ],
+  "action_items": [
+    "login.tsx: update the email state from params.email (useEffect) so it is pre-filled after a reset, and clear the password and error at the same time.",
+    "Add a global 401 handler (signOut and redirect to /welcome) and auth guards for protected screens, so a session revoked by a password change actually logs the user out.",
+    "Optional backend hardening: keep a reference to the forgot-password background task; sign the change-password token with the stored pw_version from find_one_and_update."
+  ],
+  "critical_code_review_comments": [
+    "server.py user_from_token compares the token's pwv with the stored pw_version (missing = 0). This is correct and works for older users.",
+    "Frontend change-password only checks for at least 8 characters. Over-72-byte passwords rely on the backend 400, whose message does show under the new-password field. That is acceptable."
+  ],
+  "updated_files": [
+    "/app/backend/tests/test_bytetalks_passwords.py (line 115: expected message updated to 'Incorrect or expired code')",
+    "/app/backend/tests/test_bytetalks_pw_iter5.py (new)"
+  ],
+  "success_rate": {"backend": "100% (29/29)", "frontend": "~85% (all fixes verified except the login email pre-fill; revoked-session handling missing)"},
+  "seed_data_creation": "Used seed_pw_ui_user.py for delivered@resend.dev (cleaned afterwards). TEST_pw5_ users were removed. Demo passwords checked: all are ByteTalks123!. omar has pw_version=2 from an earlier rate-limit test (harmless).",
+  "retest_needed": true,
+  "should_main_agent_self_test": true,
+  "context_for_next_testing_agent": "Run each password suite with -n 0 after `sudo supervisorctl restart backend`. UI forgot-password now sends the code in the background, which overwrites any seeded code. Click send, wait about 4s, then run `seed_pw_ui_user.py code` before entering 123456. Use dispatch_event('click') on change-password-submit.",
+  "rca_of_issue": "Pre-fill bug: router.dismissTo goes back to the already-mounted login screen and only updates its params. The email comes from a useState initializer, which never runs again."
+}

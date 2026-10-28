@@ -38,6 +38,8 @@ export const DISCOVER_MODES = [
   { value: "explore", label: "Explore", icon: "compass" },
   { value: "interests", label: "Shared Interests", icon: "people" },
   { value: "new", label: "New Here", icon: "leaf" },
+  { value: "goals", label: "Same Goals", icon: "heart", premium: true },
+  { value: "prompts", label: "Has Prompts", icon: "chatbox-ellipses", premium: true },
 ] as const;
 
 export const REPORT_REASONS = [

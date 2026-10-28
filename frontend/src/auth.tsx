@@ -1,8 +1,18 @@
 import React, { createContext, useCallback, useContext, useEffect, useState } from "react";
+import { AppState } from "react-native";
+import { router } from "expo-router";
 
-import { api, ApiError, Me, setApiToken } from "@/src/api";
-import { clearKeyCache, loadOrCreateKeys } from "@/src/e2ee";
+import { api, ApiError, Me, setApiToken, setMediaToken, setUnauthorizedHandler } from "@/src/api";
+import { setLoginNotice } from "@/src/auth-notice";
+import { clearKeyCache, loadLegacyKeys } from "@/src/e2ee";
+import { clearCacheKeys } from "@/src/signal/cache";
+import { startSignal, stopSignal } from "@/src/signal";
 import { storage } from "@/src/utils/storage";
+
+async function refreshMediaToken() {
+  const r = await api<{ token: string }>("/me/media-token").catch(() => null);
+  if (r) setMediaToken(r.token);
+}
 
 const TOKEN_KEY = "auth_token";
 
@@ -18,10 +28,8 @@ type AuthState = {
 const Ctx = createContext<AuthState | null>(null);
 
 async function ensureKeys(user: Me) {
-  const pk = await loadOrCreateKeys(user.id);
-  if (pk !== user.public_key) {
-    await api("/me/public-key", { method: "PUT", body: { public_key: pk } });
-  }
+  await loadLegacyKeys(user.id); // read-only, for old chats
+  startSignal(user.id); // enrolls this device for Signal in the background
 }
 
 export function AuthProvider({ children }: { children: React.ReactNode }) {
@@ -35,6 +43,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         setApiToken(t);
         try {
           const me = await api<Me>("/me");
+          await refreshMediaToken();
           setUser(me);
           await ensureKeys(me).catch((err) => console.warn("E2EE key setup failed", err));
         } catch (e) {
@@ -51,16 +60,55 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   const signIn = useCallback(async (token: string, u: Me) => {
     await storage.secureSet(TOKEN_KEY, token);
     setApiToken(token);
+    await refreshMediaToken();
     setUser(u);
     await ensureKeys(u).catch(() => {});
   }, []);
 
   const signOut = useCallback(async () => {
+    await stopSignal();
     await storage.secureRemove(TOKEN_KEY);
     setApiToken(null);
     clearKeyCache();
+    clearCacheKeys();
     setUser(null);
   }, []);
+
+  // Session revoked server-side (password changed/reset on another device): wipe local credentials and go to login.
+  useEffect(() => {
+    let handling = false;
+    setUnauthorizedHandler(() => {
+      if (handling) return;
+      handling = true;
+      setApiToken(null); // stop any further requests with the revoked token right away
+      signOut().finally(() => {
+        setLoginNotice({ message: "You were signed out because your password was changed. Please sign in again.", tone: "error" });
+        try {
+          router.replace("/auth/login");
+        } catch {
+          // navigator not ready; index route redirects signed-out users
+        }
+        handling = false;
+      });
+    });
+    return () => setUnauthorizedHandler(null);
+  }, [signOut]);
+
+  // Re-check the session whenever the app returns to the foreground, and renew the photo token.
+  useEffect(() => {
+    if (!user) return;
+    const sub = AppState.addEventListener("change", (st) => {
+      if (st === "active") {
+        api<Me>("/me").then(setUser).catch(() => {});
+        refreshMediaToken();
+      }
+    });
+    const iv = setInterval(refreshMediaToken, 4 * 60 * 60 * 1000);
+    return () => {
+      sub.remove();
+      clearInterval(iv);
+    };
+  }, [user?.id]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const refreshUser = useCallback(async () => {
     setUser(await api<Me>("/me"));

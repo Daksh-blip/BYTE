@@ -1,21 +1,39 @@
-import { useState } from "react";
-import { useRouter } from "expo-router";
+import { useCallback, useState } from "react";
+import { Text } from "react-native";
+import { useFocusEffect, useRouter } from "expo-router";
 
 import { api } from "@/src/api";
 import { useAuth } from "@/src/auth";
+import { takeLoginNotice } from "@/src/auth-notice";
 import { AuthShell } from "@/src/components/auth-shell";
 import { Button, Field } from "@/src/components/ui";
+import { makeStyles, spacing, radius, font } from "@/src/theme";
 
 export default function Login() {
+  const s = useStyles();
   const router = useRouter();
   const { signIn } = useAuth();
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [error, setError] = useState<string | null>(null);
+  const [notice, setNotice] = useState<{ message: string; tone: "success" | "error" } | null>(null);
   const [busy, setBusy] = useState(false);
+
+  // Runs every time the screen gains focus (including when returning from the reset flow to an already-mounted login).
+  useFocusEffect(
+    useCallback(() => {
+      const n = takeLoginNotice();
+      if (!n) return;
+      if (n.email) setEmail(n.email);
+      setPassword("");
+      setError(null);
+      setNotice({ message: n.message, tone: n.tone });
+    }, []),
+  );
 
   const submit = async () => {
     setError(null);
+    setNotice(null);
     if (!email.trim() || !password) return setError("Enter your email and password");
     setBusy(true);
     try {
@@ -34,6 +52,11 @@ export default function Login() {
 
   return (
     <AuthShell testID="login-screen" title="Welcome back" subtitle="Sign in to keep the conversation going.">
+      {notice ? (
+        <Text testID="login-notice" style={[s.notice, notice.tone === "error" ? s.noticeError : s.noticeOk]}>
+          {notice.message}
+        </Text>
+      ) : null}
       <Field
         testID="login-email-input"
         label="Email"
@@ -60,3 +83,9 @@ export default function Login() {
     </AuthShell>
   );
 }
+
+const useStyles = makeStyles((c) => ({
+  notice: { borderRadius: radius.md, padding: spacing.md, fontSize: font.base, borderWidth: 1, backgroundColor: c.surfaceSecondary },
+  noticeOk: { color: c.success, borderColor: c.success },
+  noticeError: { color: c.error, borderColor: c.error },
+}));

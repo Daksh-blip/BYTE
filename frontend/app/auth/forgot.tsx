@@ -3,6 +3,7 @@ import { Text } from "react-native";
 import { useRouter } from "expo-router";
 
 import { api } from "@/src/api";
+import { setLoginNotice } from "@/src/auth-notice";
 import { AuthShell } from "@/src/components/auth-shell";
 import { Button, Field } from "@/src/components/ui";
 import { useToast } from "@/src/components/toast";
@@ -41,9 +42,13 @@ export default function Forgot() {
     if (password.length < 8) return setError("Password must be at least 8 characters");
     setBusy(true);
     try {
-      await api("/auth/reset-password", { method: "POST", body: { email: email.trim(), code, password } });
-      toast("Password updated. Sign in with your new password.", "success");
-      router.replace("/auth/login");
+      const r = await api<{ email: string }>("/auth/reset-password", { method: "POST", body: { email: email.trim(), code, password } });
+      setPassword("");
+      setCode("");
+      // Server-confirmed email only; handed over in memory, never via the URL.
+      setLoginNotice({ email: r.email, message: "Password changed. Sign in with your new password.", tone: "success" });
+      toast("Password updated", "success");
+      router.dismissTo("/auth/login");
     } catch (e: any) {
       setError(e.message);
     } finally {
@@ -97,6 +102,7 @@ export default function Forgot() {
         onSubmitEditing={reset}
       />
       <Button testID="reset-submit-button" title="Update password" loading={busy} onPress={reset} />
+      <Button testID="reset-resend-button" title="Resend code" variant="ghost" onPress={sendCode} />
     </AuthShell>
   );
 }

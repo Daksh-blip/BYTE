@@ -1,3 +1,4 @@
+import asyncio
 import os
 import re
 import uuid
@@ -12,7 +13,7 @@ from datetime import datetime, timezone, timedelta, date
 from html import escape
 from html.parser import HTMLParser
 from pathlib import Path
-from typing import Annotated, Optional, List
+from typing import Annotated, Literal, Optional, List
 from urllib.parse import urlparse
 
 import bcrypt
@@ -26,6 +27,7 @@ from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import Response
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from motor.motor_asyncio import AsyncIOMotorClient
+from pymongo import ReturnDocument
 from pydantic import BaseModel, Field, EmailStr, BeforeValidator, ConfigDict
 from starlette.middleware.cors import CORSMiddleware
 
@@ -108,6 +110,11 @@ class User(BaseDocument):
     pronouns: str = ""
     languages: List[str] = []
     prompts: List[dict] = []
+    role: str = "user"
+    pw_version: int = 0
+    status: str = "active"  # active | warned | suspended | banned
+    status_reason: str = ""
+    suspended_until: Optional[datetime] = None
     created_at: datetime = Field(default_factory=now)
 
 
@@ -118,15 +125,26 @@ class Match(BaseDocument):
     last_sender_id: Optional[str] = None
     unread: dict = {}
     active: bool = True
+    # Records without this field predate the Signal upgrade and are legacy NaCl-box chats.
+    protocol: str = "nacl-box-v1"
+
+
+LEGACY_PROTOCOL = "nacl-box-v1"
+SIGNAL_PROTOCOL = "signal-v1"  # @open-e2ee/signal-protocol-sdk 13.3 (PQXDH + Double Ratchet + SPQR)
 
 
 class Message(BaseDocument):
     match_id: str
     sender_id: str
-    ciphertext: str
-    nonce: str
-    sender_public_key: str
-    recipient_public_key: str
+    # Legacy records have no `protocol` field and are always read as nacl-box-v1; they are never rewritten.
+    protocol: str = LEGACY_PROTOCOL
+    ciphertext: str = ""
+    nonce: Optional[str] = None
+    sender_public_key: Optional[str] = None
+    recipient_public_key: Optional[str] = None
+    sender_device: Optional[str] = None
+    recipient_device: Optional[str] = None
+    kind: Optional[str] = None  # system events, e.g. "upgraded"
     created_at: datetime = Field(default_factory=now)
 
 
@@ -188,7 +206,9 @@ def compatibility(me: User, other: User) -> dict:
 def private_profile(u: User) -> dict:
     d = public_profile(u)
     d.update({"email": u.email, "dob": u.dob, "interested_in": u.interested_in, "onboarded": u.onboarded,
-              "paused": u.paused, "age_min": u.age_min, "age_max": u.age_max, "verified": u.verified})
+              "paused": u.paused, "age_min": u.age_min, "age_max": u.age_max, "verified": u.verified,
+              "role": u.role, "status": u.status, "status_reason": u.status_reason,
+              "suspended_until": u.suspended_until.isoformat() if u.suspended_until else None})
     return d
 
 
@@ -237,32 +257,80 @@ def check_pw(p: str, h: str) -> bool:
         return False
 
 
-def make_token(uid: str) -> str:
+def make_token(uid: str, pwv: int = 0, typ: str = "access") -> str:
+    """Access tokens last JWT_DAYS. Media tokens are read-only for photo files, short-lived, and safe to put in image URLs."""
     t = now()
-    return jwt.encode({"sub": uid, "typ": "access", "iat": t, "exp": t + timedelta(days=JWT_DAYS)}, JWT_SECRET, algorithm="HS256")
+    ttl = timedelta(days=JWT_DAYS) if typ == "access" else timedelta(hours=6)
+    return jwt.encode({"sub": uid, "typ": typ, "pwv": pwv, "iat": t, "exp": t + ttl, "jti": secrets.token_hex(8)},
+                      JWT_SECRET, algorithm="HS256")
+
+
+def check_pw_bytes(pw: str):
+    if len(pw.encode()) > 72:
+        raise HTTPException(400, "Password is too long (max 72 bytes)")
 
 
 def digest(v: str) -> str:
     return hashlib.sha256(v.encode()).hexdigest()
 
 
-async def user_from_token(token: Optional[str]) -> User:
+async def user_from_token(token: Optional[str], typ: str = "access") -> User:
+    """Validates the token AND its password version against the DB on every request, so a password
+    change or reset revokes every older session immediately (there are no refresh tokens)."""
     if not token:
         raise HTTPException(401, "Not authenticated")
     try:
         p = jwt.decode(token, JWT_SECRET, algorithms=["HS256"])
-        if p.get("typ") != "access":
+        if p.get("typ") != typ:
             raise ValueError()
         doc = await db.users.find_one({"_id": ObjectId(p["sub"])})
     except Exception:
         raise HTTPException(401, "Invalid or expired session")
     if not doc:
         raise HTTPException(401, "User not found")
+    if int(p.get("pwv", 0)) != int(doc.get("pw_version", 0)):
+        raise HTTPException(401, "Your password was changed. Please sign in again.")
+    if p.get("jti") and await db.revoked_sessions.find_one({"jti": p["jti"]}, {"_id": 1}):
+        raise HTTPException(401, "This device was signed out. Please sign in again.")
     return User.from_mongo(doc)
 
 
-async def current_user(creds: Optional[HTTPAuthorizationCredentials] = Depends(bearer)) -> User:
-    return await user_from_token(creds.credentials if creds else None)
+def token_jti(request: Request) -> Optional[str]:
+    auth = request.headers.get("authorization", "")
+    try:
+        return jwt.decode(auth.split(" ", 1)[1], JWT_SECRET, algorithms=["HS256"]).get("jti")
+    except Exception:
+        return None
+
+
+def is_restricted(u: User) -> bool:
+    if u.status == "banned":
+        return True
+    return u.status == "suspended" and bool(u.suspended_until) and u.suspended_until.replace(tzinfo=timezone.utc) > now()
+
+
+RESTRICTED_OK = {("GET", "/api/me"), ("DELETE", "/api/me"), ("GET", "/api/me/export"), ("POST", "/api/appeals"), ("GET", "/api/appeals")}
+
+
+async def current_user(request: Request, creds: Optional[HTTPAuthorizationCredentials] = Depends(bearer)) -> User:
+    u = await user_from_token(creds.credentials if creds else None)
+    if u.status == "suspended" and not is_restricted(u):
+        await db.users.update_one({"_id": ObjectId(u.id)}, {"$set": {"status": "active", "suspended_until": None}})
+        u.status, u.suspended_until = "active", None
+    if is_restricted(u) and (request.method, request.url.path) not in RESTRICTED_OK:
+        raise HTTPException(403, "ACCOUNT_RESTRICTED")
+    return u
+
+
+async def require_admin(me: User = Depends(current_user)) -> User:
+    if me.role != "admin":
+        raise HTTPException(403, "Admins only")
+    return me
+
+
+async def audit(admin: User, action: str, target_id: str, detail: str = ""):
+    await db.audit_log.insert_one({"admin_id": admin.id, "action": action, "target_id": target_id,
+                                   "detail": detail[:500], "created_at": now()})
 
 
 # ---------------------------------------------------------------- email (Emergent managed)
@@ -363,8 +431,12 @@ async def send_email(*, to: str, subject: str, html: str) -> bool:
         if code in ("insufficient_credits", "integration_disabled", "daily_limit_reached"):
             logger.warning("Email paused: %s", code)
             raise HTTPException(503, "Email is temporarily unavailable")
+        if e.response.status_code == 429:
+            raise HTTPException(429, "Too many emails sent. Please wait a minute and try again.")
+        if e.response.status_code in (400, 422):
+            raise HTTPException(400, "We couldn't send an email to that address. Check it and try again.")
         logger.error("Email send failed: %s %s", e.response.status_code, e.response.text)
-        raise HTTPException(502, "Failed to send email")
+        raise HTTPException(503, "Email is temporarily unavailable. Please try again shortly.")
 
 
 def code_email(name: str, code: str, purpose: str) -> tuple[str, str]:
@@ -372,9 +444,9 @@ def code_email(name: str, code: str, purpose: str) -> tuple[str, str]:
     line = ("Use this code to verify your email and finish creating your account."
             if purpose == "verify" else "Use this code in the app to set a new password.")
     html = (
-        '<table role="presentation" width="100%" style="background:#090A0F"><tr><td style="padding:32px;'
+        '<table role="presentation" width="100%" style="background:#0A0607"><tr><td style="padding:32px;'
         'font-family:Arial,sans-serif;color:#F2F2F4">'
-        f'<h2 style="color:#00E5FF;margin:0 0 16px">{escape(EMAIL_FROM_NAME)}</h2>'
+        f'<h2 style="color:#FF2D46;margin:0 0 16px">{escape(EMAIL_FROM_NAME)}</h2>'
         f'<p>Hi {escape(name or "there")},</p><p>{line}</p>'
         f'<p style="font-size:32px;letter-spacing:8px;font-weight:bold;color:#FFFFFF">{escape(code)}</p>'
         '<p>This code expires in 15 minutes. If you did not request it, you can ignore this email.</p>'
@@ -397,12 +469,12 @@ async def issue_code(email: str, name: str, kind: str) -> dict:
 async def consume_code(email: str, kind: str, code: str):
     row = await db.auth_codes.find_one({"email": email, "kind": kind})
     if not row or row["expires_at"].replace(tzinfo=timezone.utc) < now():
-        raise HTTPException(400, "Code expired. Request a new one.")
+        raise HTTPException(400, "Incorrect or expired code")
     if row["attempts"] >= 5:
         raise HTTPException(400, "Too many wrong attempts. Request a new code.")
     if not secrets.compare_digest(row["code_hash"], digest(code.strip())):
         await db.auth_codes.update_one({"_id": row["_id"]}, {"$inc": {"attempts": 1}})
-        raise HTTPException(400, "Incorrect code")
+        raise HTTPException(400, "Incorrect or expired code")
     await db.auth_codes.delete_one({"_id": row["_id"]})
 
 
@@ -492,10 +564,6 @@ class ProfileIn(BaseModel):
     prompts: Optional[List[dict]] = None
 
 
-class KeyIn(BaseModel):
-    public_key: str = Field(min_length=40, max_length=60)
-
-
 class SwipeIn(BaseModel):
     target_id: str
     action: str
@@ -503,10 +571,10 @@ class SwipeIn(BaseModel):
 
 
 class MessageIn(BaseModel):
+    # Only Signal messages can be sent. Legacy NaCl sends were retired, so nothing can downgrade.
+    protocol: Literal["signal-v1"]
     ciphertext: str = Field(min_length=1, max_length=20000)
-    nonce: str = Field(min_length=20, max_length=40)
-    sender_public_key: str
-    recipient_public_key: str
+    recipient_device: str = Field(min_length=1, max_length=40)
 
 
 class BlockIn(BaseModel):
@@ -534,6 +602,7 @@ def oid(v: str) -> ObjectId:
 @api.post("/auth/register")
 async def register(body: RegisterIn, request: Request):
     rate_limit(request, "register", 30, 3600)
+    check_pw_bytes(body.password)
     email = str(body.email).lower()
     existing = User.from_mongo(await db.users.find_one({"email": email}))
     if existing and existing.verified:
@@ -565,11 +634,11 @@ async def verify_email(body: VerifyIn, request: Request):
     rate_limit_key("verify", email, 10, 900)
     u = User.from_mongo(await db.users.find_one({"email": email}))
     if not u:
-        raise HTTPException(400, "Incorrect code")
+        raise HTTPException(400, "Incorrect or expired code")
     await consume_code(email, "verify", body.code)
     await db.users.update_one({"_id": ObjectId(u.id)}, {"$set": {"verified": True}})
     u.verified = True
-    return {"token": make_token(u.id), "user": private_profile(u)}
+    return {"token": make_token(u.id, u.pw_version), "user": private_profile(u)}
 
 
 @api.post("/auth/login")
@@ -581,7 +650,7 @@ async def login(body: LoginIn, request: Request):
         raise HTTPException(401, "Invalid email or password")
     if not u.verified:
         raise HTTPException(403, "EMAIL_NOT_VERIFIED")
-    return {"token": make_token(u.id), "user": private_profile(u)}
+    return {"token": make_token(u.id, u.pw_version), "user": private_profile(u)}
 
 
 @api.post("/auth/forgot-password")
@@ -589,10 +658,15 @@ async def forgot_password(body: EmailIn, request: Request):
     rate_limit(request, "forgot", 5, 3600)
     email = str(body.email).lower()
     u = User.from_mongo(await db.users.find_one({"email": email}))
-    res = {"email_sent": True}
     if u:
-        res = await issue_code(email, u.name, "reset")
-    return {"message": "If that email has an account, a reset code was sent", **res}
+        # Send in the background so response time doesn't reveal whether the account exists.
+        async def _send():
+            try:
+                await issue_code(email, u.name, "reset")
+            except Exception as e:  # noqa: BLE001
+                logger.warning("Reset email failed: %s", getattr(e, "detail", e))
+        asyncio.create_task(_send())
+    return {"message": "If that email has an account, a reset code was sent", "email_sent": True}
 
 
 @api.post("/auth/reset-password")
@@ -601,11 +675,82 @@ async def reset_password(body: ResetIn, request: Request):
     email = str(body.email).lower()
     rate_limit_key("reset", email, 8, 3600)
     u = User.from_mongo(await db.users.find_one({"email": email}))
+    check_pw_bytes(body.password)
     if not u:
-        raise HTTPException(400, "Incorrect code")
+        raise HTTPException(400, "Incorrect or expired code")
     await consume_code(email, "reset", body.code)
-    await db.users.update_one({"_id": ObjectId(u.id)}, {"$set": {"password_hash": hash_pw(body.password), "verified": True}})
-    return {"message": "Password updated. You can sign in now."}
+    await db.users.update_one({"_id": ObjectId(u.id)}, {"$set": {"password_hash": hash_pw(body.password), "verified": True},
+                                                       "$inc": {"pw_version": 1}})
+    notify_password_changed(u)
+    # The email is returned only after the code proved ownership, so the app can pre-fill the login form.
+    return {"message": "Password updated. You can sign in now.", "email": email}
+
+
+class ChangePasswordIn(BaseModel):
+    current_password: str = Field(max_length=72)
+    new_password: str = Field(min_length=8, max_length=72)
+
+
+@api.post("/me/password")
+async def change_password(body: ChangePasswordIn, request: Request, me: User = Depends(current_user)):
+    rate_limit(request, "change_pw", 10, 900)
+    if not check_pw(body.current_password, me.password_hash):
+        raise HTTPException(400, "Current password is incorrect")
+    if body.current_password == body.new_password:
+        raise HTTPException(400, "Choose a password different from your current one")
+    check_pw_bytes(body.new_password)
+    # Compare-and-swap on pw_version: if another change landed first, this one fails instead of racing.
+    doc = await db.users.find_one_and_update(
+        {"_id": ObjectId(me.id), "pw_version": me.pw_version} if me.pw_version else
+        {"_id": ObjectId(me.id), "pw_version": {"$in": [0, None]}},
+        {"$set": {"password_hash": hash_pw(body.new_password)}, "$inc": {"pw_version": 1}},
+        return_document=ReturnDocument.AFTER)
+    if not doc:
+        raise HTTPException(401, "Your password was changed. Please sign in again.")
+    notify_password_changed(me)
+    # Other sessions are signed out; this device gets a fresh token, so its Signal device follows the new session.
+    jti = token_jti(request)
+    new_token = make_token(me.id, int(doc["pw_version"]))
+    if jti:
+        new_jti = jwt.decode(new_token, JWT_SECRET, algorithms=["HS256"])["jti"]
+        await db.signal_devices.update_many({"user_id": me.id, "session_jti": jti}, {"$set": {"session_jti": new_jti}})
+    return {"message": "Password changed", "token": new_token}
+
+
+@api.get("/me/media-token")
+async def media_token(me: User = Depends(current_user)):
+    """Short-lived, photo-only token for image URLs, so the real session token never appears in URLs or access logs."""
+    return {"token": make_token(me.id, me.pw_version, "media")}
+
+
+_bg_tasks: set = set()
+
+
+def notify_password_changed(u: User):
+    security_notice(u, "Your password was changed",
+                    "The password for your account was just changed, and every other device was signed out. "
+                    "If this was not you, reset your password from the app straight away.")
+
+
+def security_notice(u: User, subject: str, line: str):
+    """Generic account-security email, sent in the background. Contains no tokens, codes or device details."""
+    html = (
+        '<table role="presentation" width="100%" style="background:#0A0607"><tr><td style="padding:32px;'
+        'font-family:Arial,sans-serif;color:#F2F2F4">'
+        f'<h2 style="color:#FF2D46;margin:0 0 16px">{escape(EMAIL_FROM_NAME)}</h2>'
+        f'<p>Hi {escape(u.name or "there")},</p><p>{escape(line)}</p>'
+        f'<p style="font-size:12px;color:#8B8D99">Sent by {escape(EMAIL_FROM_NAME)}. We never ask for your '
+        'password by email.</p></td></tr></table>'
+    )
+
+    async def _send():
+        try:
+            await send_email(to=u.email, subject=f"{EMAIL_FROM_NAME}: {subject}", html=html)
+        except Exception as e:  # noqa: BLE001
+            logger.warning("Security notice failed: %s", getattr(e, "detail", type(e).__name__))
+    t = asyncio.create_task(_send())
+    _bg_tasks.add(t)
+    t.add_done_callback(_bg_tasks.discard)
 
 
 # ---------------------------------------------------------------- me / profile
@@ -658,12 +803,6 @@ async def update_me(body: ProfileIn, me: User = Depends(current_user)):
     return private_profile(merged)
 
 
-@api.put("/me/public-key")
-async def set_public_key(body: KeyIn, me: User = Depends(current_user)):
-    await db.users.update_one({"_id": ObjectId(me.id)}, {"$set": {"public_key": body.public_key}})
-    return {"ok": True}
-
-
 @api.post("/me/photos")
 async def upload_photo(file: UploadFile = File(...), me: User = Depends(current_user)):
     if len(me.photos) >= 6:
@@ -707,7 +846,10 @@ async def make_primary(photo_id: str, me: User = Depends(current_user)):
 @api.get("/files/{path:path}")
 async def get_file(path: str, token: Optional[str] = Query(default=None),
                    creds: Optional[HTTPAuthorizationCredentials] = Depends(bearer)):
-    await user_from_token(creds.credentials if creds else token)
+    if creds:
+        await user_from_token(creds.credentials)
+    else:
+        await user_from_token(token, "media")
     if not await db.users.find_one({"photos.path": path}, {"_id": 1}):
         raise HTTPException(404, "File not found")
     content, ctype = await run_in_threadpool(get_object, path)
@@ -722,7 +864,8 @@ async def export_data(me: User = Depends(current_user)):
               async for x in db.swipes.find({"from_id": uid})]
     matches = [{"id": str(m["_id"]), "with": next(u for u in m["users"] if u != uid), "created_at": m["created_at"].isoformat(),
                 "active": m.get("active", True)} async for m in db.matches.find({"users": uid})]
-    msgs = [{"match_id": m["match_id"], "sent_by_me": m["sender_id"] == uid, "ciphertext": m["ciphertext"],
+    msgs = [{"match_id": m["match_id"], "sent_by_me": m["sender_id"] == uid, "protocol": m.get("protocol", LEGACY_PROTOCOL),
+             "ciphertext": m.get("ciphertext", ""),
              "at": m["created_at"].isoformat()} async for m in db.messages.find({"match_id": {"$in": [x["id"] for x in matches]}})]
     blocks = [b["blocked_id"] async for b in db.blocks.find({"blocker_id": uid})]
     reports = [{"reported_id": r["reported_id"], "reason": r["reason"], "at": r["created_at"].isoformat()}
@@ -741,6 +884,7 @@ async def delete_account(me: User = Depends(current_user)):
     await db.blocks.delete_many({"$or": [{"blocker_id": uid}, {"blocked_id": uid}]})
     await db.reports.delete_many({"reporter_id": uid})
     await db.auth_codes.delete_many({"email": me.email})
+    await db.signal_devices.delete_many({"user_id": uid})
     # Photo files become unreachable (the file route requires a DB record); storage has no delete API.
     await db.users.delete_one({"_id": ObjectId(uid)})
     return {"ok": True}
@@ -758,7 +902,7 @@ async def blocked_ids(uid: str) -> set:
 async def discover(mode: str = Query(default="smart"), me: User = Depends(current_user)):
     swiped = {s["to_id"] async for s in db.swipes.find({"from_id": me.id}, {"to_id": 1})}
     exclude = swiped | await blocked_ids(me.id) | {me.id}
-    q = {"onboarded": True, "paused": False, "_id": {"$nin": [ObjectId(x) for x in exclude if ObjectId.is_valid(x)]}}
+    q = {"onboarded": True, "paused": False, "status": {"$nin": ["banned", "suspended"]}, "role": {"$ne": "admin"}, "_id": {"$nin": [ObjectId(x) for x in exclude if ObjectId.is_valid(x)]}}
     if me.interested_in:
         q["gender"] = {"$in": me.interested_in}
     if mode == "new":
@@ -813,10 +957,12 @@ async def create_match_if_mutual(a: str, b: str) -> Optional[str]:
     existing = await db.matches.find_one({"users": pair})
     if existing:
         if not existing.get("active", True):
+            # A rematch starts empty (messages were deleted on unmatch), so it starts on Signal.
             await db.matches.update_one({"_id": existing["_id"]}, {"$set": {
-                "active": True, "created_at": now(), "last_message_at": None, "last_sender_id": None, "unread": {a: 0, b: 0}}})
+                "active": True, "created_at": now(), "last_message_at": None, "last_sender_id": None, "unread": {a: 0, b: 0},
+                "protocol": SIGNAL_PROTOCOL}})
         return str(existing["_id"])
-    res = await db.matches.insert_one(Match(users=pair, unread={a: 0, b: 0}).to_mongo())
+    res = await db.matches.insert_one(Match(users=pair, unread={a: 0, b: 0}, protocol=SIGNAL_PROTOCOL).to_mongo())
     return str(res.inserted_id)
 
 
@@ -849,7 +995,7 @@ async def likes(me: User = Depends(current_user)):
     async for s in db.swipes.find({"to_id": me.id, "action": {"$in": ["like", "superlike"]}}).sort("created_at", -1):
         if s["from_id"] in mine or s["from_id"] in blocked:
             continue
-        u = User.from_mongo(await db.users.find_one({"_id": oid(s["from_id"]), "paused": False}))
+        u = User.from_mongo(await db.users.find_one({"_id": oid(s["from_id"]), "paused": False, "status": {"$nin": ["banned", "suspended"]}}))
         if u:
             p = public_profile(u)
             p["superlike"] = s["action"] == "superlike"
@@ -903,7 +1049,7 @@ async def match_detail(match_id: str, me: User = Depends(current_user)):
     m = await load_match(match_id, me)
     other_id = next(u for u in m.users if u != me.id)
     other = User.from_mongo(await db.users.find_one({"_id": oid(other_id)}))
-    return {"id": m.id, "user": public_profile(other), "created_at": m.created_at.isoformat()}
+    return {"id": m.id, "user": public_profile(other), "created_at": m.created_at.isoformat(), "protocol": m.protocol}
 
 
 @api.delete("/matches/{match_id}")
@@ -917,9 +1063,15 @@ async def unmatch(match_id: str, me: User = Depends(current_user)):
 
 
 def msg_out(m: Message) -> dict:
-    return {"id": m.id, "sender_id": m.sender_id, "ciphertext": m.ciphertext, "nonce": m.nonce,
-            "sender_public_key": m.sender_public_key, "recipient_public_key": m.recipient_public_key,
-            "created_at": m.created_at.isoformat()}
+    out = {"id": m.id, "sender_id": m.sender_id, "protocol": m.protocol, "created_at": m.created_at.isoformat()}
+    if m.protocol == LEGACY_PROTOCOL:
+        out.update(ciphertext=m.ciphertext, nonce=m.nonce, sender_public_key=m.sender_public_key,
+                   recipient_public_key=m.recipient_public_key)
+    elif m.protocol == SIGNAL_PROTOCOL:
+        out.update(ciphertext=m.ciphertext, sender_device=m.sender_device, recipient_device=m.recipient_device)
+    else:
+        out.update(kind=m.kind)
+    return out
 
 
 @api.get("/matches/{match_id}/messages")
@@ -931,16 +1083,239 @@ async def get_messages(match_id: str, me: User = Depends(current_user)):
     return [msg_out(x) for x in msgs]
 
 
+@api.post("/matches/{match_id}/upgrade-encryption")
+async def upgrade_encryption(match_id: str, me: User = Depends(current_user)):
+    """Explicit, authenticated, one-way upgrade of a legacy chat to Signal. There is no endpoint to revert."""
+    m = await load_match(match_id, me)
+    if m.protocol == SIGNAL_PROTOCOL:
+        return {"protocol": SIGNAL_PROTOCOL}
+    res = await db.matches.update_one({"_id": ObjectId(m.id), "protocol": {"$ne": SIGNAL_PROTOCOL}},
+                                      {"$set": {"protocol": SIGNAL_PROTOCOL, "upgraded_at": now(), "upgraded_by": me.id}})
+    if res.modified_count:
+        await db.messages.insert_one(Message(match_id=m.id, sender_id=me.id, protocol="system", kind="upgraded").to_mongo())
+    return {"protocol": SIGNAL_PROTOCOL}
+
+
+# ---------------------------------------------------------------- Signal relay (public keys + routing only)
+# One active Signal device per account (deviceId 1). Enrolling a new device replaces the old one, and peers
+# see an identity-change warning. The server never receives private keys or plaintext.
+B64 = r"^[A-Za-z0-9+/=]+$"
+
+
+class SignalIdentity(BaseModel):
+    version: Literal[1]
+    x25519PublicKey: str = Field(min_length=40, max_length=64, pattern=B64)
+    ed25519PublicKey: str = Field(min_length=40, max_length=64, pattern=B64)
+
+
+class ProvisionIn(BaseModel):
+    deviceId: int = Field(ge=1, le=1)
+    identity: SignalIdentity
+    registrationId: int = Field(ge=1, le=16380)
+    identityType: Literal["aci"] = "aci"
+    platform: str = Field(default="", max_length=20)
+
+
+class PreKeyIn(BaseModel):
+    type: Literal["ecPreKey", "ecSignedPreKey", "kemOneTimePreKey", "kemLastResortPreKey"]
+    keyId: int = Field(ge=0, le=2**31)
+    publicKey: str = Field(min_length=40, max_length=2200, pattern=B64)
+    signature: Optional[str] = Field(default=None, max_length=200, pattern=B64)
+
+
+class PreKeysIn(BaseModel):
+    keys: List[PreKeyIn] = Field(max_length=210)
+
+
+MAX_OTPKS = 200
+
+
+def request_device(request: Request) -> str:
+    return request.headers.get("x-signal-device", "")
+
+
+async def active_device(uid: str) -> Optional[dict]:
+    return await db.signal_devices.find_one({"user_id": uid, "active": True})
+
+
+async def my_device(request: Request, me: User) -> dict:
+    dev_id = request_device(request)
+    d = await db.signal_devices.find_one({"_id": oid(dev_id), "user_id": me.id}) if dev_id else None
+    if not d:
+        raise HTTPException(409, "DEVICE_UNKNOWN")
+    if not d.get("active"):
+        raise HTTPException(409, "DEVICE_REVOKED")
+    return d
+
+
+async def require_contact(me: User, uid: str):
+    if uid == me.id:
+        return
+    if uid in await blocked_ids(me.id) or not await db.matches.find_one({"users": sorted([me.id, uid]), "active": True}, {"_id": 1}):
+        raise HTTPException(404, "Not found")
+
+
+def _meta(k: Optional[dict]):
+    if not k:
+        return None
+    at = int(k["at"].replace(tzinfo=timezone.utc).timestamp() * 1000)
+    return {"keyId": k["keyId"], "createdAt": at, "expiresAt": at + 30 * 86400 * 1000, "publicKey": k["publicKey"]}
+
+
+def device_out(d: dict, current: str = "") -> dict:
+    return {"id": str(d["_id"]), "platform": d.get("platform", ""), "active": d.get("active", False),
+            "created_at": d["created_at"].isoformat(), "revoked_at": d["revoked_at"].isoformat() if d.get("revoked_at") else None,
+            "revoked_reason": d.get("revoked_reason"), "current": str(d["_id"]) == current}
+
+
+@api.post("/signal/identity")
+async def signal_provision(body: ProvisionIn, request: Request, me: User = Depends(current_user)):
+    ident = body.identity.model_dump()
+    cur = await active_device(me.id)
+    if cur and cur["identity"] == ident and cur["registration_id"] == body.registrationId:
+        return {"device": str(cur["_id"]), "created": False}
+    had_device = cur is not None
+    await db.signal_devices.update_many({"user_id": me.id, "active": True},
+                                        {"$set": {"active": False, "revoked_at": now(), "revoked_reason": "replaced",
+                                                  "ec": [], "kem": []}})
+    res = await db.signal_devices.insert_one({
+        "user_id": me.id, "device_id": 1, "identity": ident, "registration_id": body.registrationId, "active": True,
+        "platform": body.platform, "session_jti": token_jti(request), "created_at": now(),
+        "spk": None, "lr": None, "ec": [], "kem": []})
+    if had_device:
+        security_notice(me, "A new device was set up for secure chat",
+                        "A new device was just set up for your encrypted chats, replacing the previous one. "
+                        "If this was not you, change your password straight away.")
+    return {"device": str(res.inserted_id), "created": True}
+
+
+@api.get("/signal/device-status")
+async def signal_device_status(device: str = Query(...), me: User = Depends(current_user)):
+    d = await db.signal_devices.find_one({"_id": oid(device), "user_id": me.id})
+    return {"active": bool(d and d.get("active")), "revoked_reason": d.get("revoked_reason") if d else "unknown"}
+
+
+@api.get("/signal/inventory")
+async def signal_inventory(request: Request, me: User = Depends(current_user)):
+    dev_id = request_device(request)
+    d = await db.signal_devices.find_one({"_id": oid(dev_id), "user_id": me.id, "active": True}) if dev_id else None
+    if not d:
+        return {"ecSignedPreKey": None, "kemLastResortPreKey": None, "ecOneTimePreKeyCount": 0, "kemOneTimePreKeyCount": 0}
+    return {"ecSignedPreKey": _meta(d.get("spk")), "kemLastResortPreKey": _meta(d.get("lr")),
+            "ecOneTimePreKeyCount": len(d.get("ec", [])), "kemOneTimePreKeyCount": len(d.get("kem", []))}
+
+
+@api.post("/signal/prekeys")
+async def signal_upload_prekeys(body: PreKeysIn, request: Request, me: User = Depends(current_user)):
+    d = await my_device(request, me)
+    sets, push = {}, {"ec": [], "kem": []}
+    for k in body.keys:
+        rec = {"keyId": k.keyId, "publicKey": k.publicKey, "signature": k.signature, "at": now()}
+        if k.type == "ecSignedPreKey":
+            if not k.signature:
+                raise HTTPException(400, "Signed prekey needs a signature")
+            sets["spk"] = rec
+        elif k.type == "kemLastResortPreKey":
+            if not k.signature:
+                raise HTTPException(400, "KEM prekey needs a signature")
+            sets["lr"] = rec
+        elif k.type == "ecPreKey":
+            push["ec"].append(rec)
+        else:
+            if not k.signature:
+                raise HTTPException(400, "KEM prekey needs a signature")
+            push["kem"].append(rec)
+    upd: dict = {}
+    if sets:
+        upd["$set"] = sets
+    pushes = {f: {"$each": v, "$slice": -MAX_OTPKS} for f, v in push.items() if v}
+    if pushes:
+        upd["$push"] = pushes
+    if upd:
+        await db.signal_devices.update_one({"_id": d["_id"], "active": True}, upd)
+    return {"ok": True}
+
+
+@api.post("/signal/prekeys/clear-kem")
+async def signal_clear_kem(request: Request, me: User = Depends(current_user)):
+    d = await my_device(request, me)
+    await db.signal_devices.update_one({"_id": d["_id"]}, {"$set": {"kem": []}})
+    return {"cleared": len(d.get("kem", []))}
+
+
+@api.get("/signal/identity/{user_id}")
+async def signal_identity(user_id: str, me: User = Depends(current_user)):
+    await require_contact(me, user_id)
+    d = await active_device(user_id)
+    if not d:
+        return {"identity": None, "device": None, "registrationId": None}
+    return {"identity": d["identity"], "device": str(d["_id"]), "registrationId": d["registration_id"]}
+
+
+@api.post("/signal/bundle/{user_id}")
+async def signal_bundle(user_id: str, me: User = Depends(current_user)):
+    await require_contact(me, user_id)
+    if user_id == me.id:
+        raise HTTPException(400, "Cannot fetch your own bundle")
+    rate_limit_key("bundle", me.id, 60, 3600)
+    # Atomically consume one EC and one KEM one-time prekey (the pre-update document holds the popped ones).
+    d = await db.signal_devices.find_one_and_update({"user_id": user_id, "active": True}, {"$pop": {"ec": -1, "kem": -1}},
+                                                    return_document=ReturnDocument.BEFORE)
+    if not d or not d.get("spk") or not d.get("lr"):
+        raise HTTPException(409, "NO_SECURE_DEVICE")
+    ec, kem = (d.get("ec") or [None])[0], (d.get("kem") or [None])[0]
+    return {"device": str(d["_id"]), "bundle": {
+        "registrationId": d["registration_id"], "deviceId": 1, "identity": d["identity"],
+        "ecSignedPreKey": {"keyId": d["spk"]["keyId"], "publicKey": d["spk"]["publicKey"], "signature": d["spk"]["signature"]},
+        "ecOneTimePreKey": {"keyId": ec["keyId"], "publicKey": ec["publicKey"]} if ec else None,
+        "kemLastResortPreKey": {"keyId": d["lr"]["keyId"], "publicKey": d["lr"]["publicKey"], "signature": d["lr"]["signature"]},
+        "kemOneTimePreKey": {"keyId": kem["keyId"], "publicKey": kem["publicKey"], "signature": kem["signature"]} if kem else None,
+    }}
+
+
+@api.get("/signal/devices")
+async def signal_devices(request: Request, me: User = Depends(current_user)):
+    cur = request_device(request)
+    docs = [d async for d in db.signal_devices.find({"user_id": me.id}).sort("created_at", -1).limit(20)]
+    return [device_out(d, cur) for d in docs]
+
+
+@api.delete("/signal/devices/{device_id}")
+async def signal_revoke(device_id: str, request: Request, me: User = Depends(current_user)):
+    cur = request_device(request)
+    if not cur:
+        raise HTTPException(409, "Secure chat is still starting on this device. Try again in a moment.")
+    if device_id == cur:
+        raise HTTPException(400, "Use Sign out to remove this device")
+    d = await db.signal_devices.find_one({"_id": oid(device_id), "user_id": me.id})
+    if not d:
+        raise HTTPException(404, "Device not found")
+    await db.signal_devices.update_one({"_id": d["_id"]}, {"$set": {"active": False, "revoked_at": now(),
+                                                                    "revoked_reason": "revoked", "ec": [], "kem": []}})
+    # Also end that device's login session, so it can't quietly re-enroll without the password.
+    if d.get("session_jti"):
+        await db.revoked_sessions.update_one({"jti": d["session_jti"]}, {"$set": {"jti": d["session_jti"], "at": now()}}, upsert=True)
+    return {"ok": True}
+
+
+
 @api.post("/matches/{match_id}/messages")
-async def send_message(match_id: str, body: MessageIn, me: User = Depends(current_user)):
+async def send_message(match_id: str, body: MessageIn, request: Request, me: User = Depends(current_user)):
     m = await load_match(match_id, me)
     other_id = next(u for u in m.users if u != me.id)
     if other_id in await blocked_ids(me.id):
         raise HTTPException(403, "You can't message this person")
-    other = User.from_mongo(await db.users.find_one({"_id": oid(other_id)}))
-    if body.sender_public_key != me.public_key or not other or body.recipient_public_key != other.public_key:
-        raise HTTPException(409, "Security keys changed. Refresh the chat and try again.")
-    msg = Message(match_id=m.id, sender_id=me.id, **body.model_dump())
+    if m.protocol != SIGNAL_PROTOCOL:
+        raise HTTPException(409, "UPGRADE_REQUIRED")
+    mine = await active_device(me.id)
+    if not mine or mine["_id"] != oid(request_device(request)):
+        raise HTTPException(409, "DEVICE_NOT_ACTIVE")
+    theirs = await active_device(other_id)
+    if not theirs or str(theirs["_id"]) != body.recipient_device:
+        raise HTTPException(409, "RECIPIENT_DEVICE_CHANGED")
+    # Routing metadata is set by the server from trusted context, never taken from the client.
+    msg = Message(match_id=m.id, sender_id=me.id, protocol=SIGNAL_PROTOCOL, ciphertext=body.ciphertext,
+                  sender_device=str(mine["_id"]), recipient_device=body.recipient_device)
     res = await db.messages.insert_one(msg.to_mongo())
     msg.id = str(res.inserted_id)
     await db.matches.update_one({"_id": ObjectId(m.id)}, {"$set": {"last_message_at": msg.created_at, "last_sender_id": me.id},
@@ -982,6 +1357,129 @@ async def report(body: ReportIn, me: User = Depends(current_user)):
     await db.reports.insert_one({"reporter_id": me.id, "reported_id": body.user_id, "reason": body.reason,
                                  "details": body.details, "status": "open", "created_at": now()})
     return {"ok": True}
+
+
+# ---------------------------------------------------------------- moderation
+class AppealIn(BaseModel):
+    message: str = Field(min_length=10, max_length=1000)
+
+
+class ResolveIn(BaseModel):
+    action: str  # dismiss | warn | suspend | ban
+    note: str = Field(default="", max_length=500)
+    days: int = Field(default=7, ge=1, le=365)
+
+
+class DecideIn(BaseModel):
+    decision: str  # approve | deny
+    note: str = Field(default="", max_length=500)
+
+
+@api.get("/appeals")
+async def my_appeals(me: User = Depends(current_user)):
+    return [{"id": str(a["_id"]), "message": a["message"], "status": a["status"], "note": a.get("note", ""),
+             "created_at": a["created_at"].isoformat()} async for a in db.appeals.find({"user_id": me.id}).sort("created_at", -1)]
+
+
+@api.post("/appeals")
+async def create_appeal(body: AppealIn, me: User = Depends(current_user)):
+    if not is_restricted(me):
+        raise HTTPException(400, "Your account isn't restricted")
+    if await db.appeals.find_one({"user_id": me.id, "status": "open"}):
+        raise HTTPException(400, "You already have an appeal under review")
+    await db.appeals.insert_one({"user_id": me.id, "message": body.message.strip(), "status": "open",
+                                 "restriction": me.status, "reason": me.status_reason, "created_at": now()})
+    return {"ok": True}
+
+
+async def brief(uid: str) -> dict:
+    u = User.from_mongo(await db.users.find_one({"_id": ObjectId(uid)})) if ObjectId.is_valid(uid) else None
+    if not u:
+        return {"id": uid, "name": "Deleted user", "photo": None, "status": "deleted"}
+    return {"id": u.id, "name": u.name, "email": u.email, "photo": photo_url(u.photos[0]) if u.photos else None,
+            "status": u.status, "is_demo": u.is_seed}
+
+
+@api.get("/admin/stats")
+async def admin_stats(_: User = Depends(require_admin)):
+    return {"users": await db.users.count_documents({"is_seed": False, "role": "user"}),
+            "matches": await db.matches.count_documents({"active": True}),
+            "open_reports": await db.reports.count_documents({"status": "open"}),
+            "open_appeals": await db.appeals.count_documents({"status": "open"}),
+            "suspended": await db.users.count_documents({"status": "suspended"}),
+            "banned": await db.users.count_documents({"status": "banned"})}
+
+
+@api.get("/admin/reports")
+async def admin_reports(status: str = Query(default="open"), _: User = Depends(require_admin)):
+    out = []
+    async for r in db.reports.find({"status": status}).sort("created_at", -1).limit(100):
+        out.append({"id": str(r["_id"]), "reason": r["reason"], "details": r.get("details", ""), "status": r["status"],
+                    "created_at": r["created_at"].isoformat(), "resolution": r.get("resolution"),
+                    "reported": await brief(r["reported_id"]), "reporter": await brief(r["reporter_id"]),
+                    "prior_reports": await db.reports.count_documents({"reported_id": r["reported_id"]})})
+    return out
+
+
+@api.post("/admin/reports/{report_id}/resolve")
+async def resolve_report(report_id: str, body: ResolveIn, admin: User = Depends(require_admin)):
+    if body.action not in ("dismiss", "warn", "suspend", "ban"):
+        raise HTTPException(400, "Invalid action")
+    r = await db.reports.find_one({"_id": oid(report_id)})
+    if not r:
+        raise HTTPException(404, "Report not found")
+    if body.action != "dismiss":
+        target = await db.users.find_one({"_id": oid(r["reported_id"])})
+        if not target:
+            raise HTTPException(404, "Reported user no longer exists")
+        if target.get("role") == "admin":
+            raise HTTPException(400, "Admins can't be actioned here")
+        reason = body.note.strip() or r["reason"]
+        upd = {"warn": {"status": "warned", "status_reason": reason, "suspended_until": None},
+               "suspend": {"status": "suspended", "status_reason": reason, "suspended_until": now() + timedelta(days=body.days)},
+               "ban": {"status": "banned", "status_reason": reason, "suspended_until": None}}[body.action]
+        await db.users.update_one({"_id": target["_id"]}, {"$set": upd})
+    await db.reports.update_many({"reported_id": r["reported_id"], "status": "open"} if body.action != "dismiss" else {"_id": r["_id"]},
+                                 {"$set": {"status": "resolved", "resolution": body.action, "resolved_by": admin.id, "resolved_at": now()}})
+    await audit(admin, f"report_{body.action}", r["reported_id"], body.note)
+    return {"ok": True}
+
+
+@api.get("/admin/appeals")
+async def admin_appeals(status: str = Query(default="open"), _: User = Depends(require_admin)):
+    return [{"id": str(a["_id"]), "message": a["message"], "status": a["status"], "restriction": a.get("restriction"),
+             "reason": a.get("reason", ""), "created_at": a["created_at"].isoformat(), "user": await brief(a["user_id"])}
+            async for a in db.appeals.find({"status": status}).sort("created_at", 1).limit(100)]
+
+
+@api.post("/admin/appeals/{appeal_id}/decide")
+async def decide_appeal(appeal_id: str, body: DecideIn, admin: User = Depends(require_admin)):
+    if body.decision not in ("approve", "deny"):
+        raise HTTPException(400, "Invalid decision")
+    a = await db.appeals.find_one({"_id": oid(appeal_id), "status": "open"})
+    if not a:
+        raise HTTPException(404, "Appeal not found")
+    if body.decision == "approve":
+        await db.users.update_one({"_id": oid(a["user_id"])}, {"$set": {"status": "active", "status_reason": "", "suspended_until": None}})
+    await db.appeals.update_one({"_id": a["_id"]}, {"$set": {"status": "approved" if body.decision == "approve" else "denied",
+                                                             "note": body.note.strip(), "decided_by": admin.id, "decided_at": now()}})
+    await audit(admin, f"appeal_{body.decision}", a["user_id"], body.note)
+    return {"ok": True}
+
+
+@api.get("/admin/audit")
+async def admin_audit(_: User = Depends(require_admin)):
+    return [{"action": x["action"], "target_id": x["target_id"], "detail": x.get("detail", ""), "admin_id": x["admin_id"],
+             "created_at": x["created_at"].isoformat()} async for x in db.audit_log.find().sort("created_at", -1).limit(50)]
+
+
+async def seed_admin():
+    email = os.environ["ADMIN_EMAIL"].strip().lower()
+    await db.users.update_one({"email": email}, {
+        "$set": {"role": "admin", "verified": True},
+        "$setOnInsert": {k: v for k, v in User(email=email, password_hash=hash_pw(os.environ["ADMIN_PASSWORD"]),
+                                               name="Moderator").to_mongo().items() if k not in ("role", "verified", "email")},
+    }, upsert=True)
 
 
 # ---------------------------------------------------------------- seed data
@@ -1049,7 +1547,11 @@ async def startup():
     await db.matches.create_index("users")
     await db.messages.create_index([("match_id", 1), ("created_at", 1)])
     await db.auth_codes.create_index("expires_at", expireAfterSeconds=0)
+    await db.signal_devices.create_index([("user_id", 1), ("active", 1)])
+    await db.revoked_sessions.create_index("jti", unique=True)
+    await db.revoked_sessions.create_index("at", expireAfterSeconds=(JWT_DAYS + 1) * 86400)
     await seed()
+    await seed_admin()
     try:
         await run_in_threadpool(init_storage)
         logger.info("Object storage initialized")

@@ -1,0 +1,56 @@
+{
+  "summary": "Iteration 4 tested the password features. Backend: 18 pytest tests (13 functional in test_bytetalks_passwords.py and 5 rate-limit tests in test_bytetalks_password_ratelimits.py); 17 pass. Working: register validation (<8 and >72 return 422), generic login 401, unverified login 403 EMAIL_NOT_VERIFIED, generic forgot-password response, reset codes (wrong-code counter, lockout after 5, expiry, single use, old-password rejection, JWT revocation), change-password (wrong current 400, same password 400, short 422, no auth 401, fresh token, old token 401, new password logs in), and all rate limits (login per email 8 and per IP 10, reset per email 8 and per IP 10, forgot 5, change_pw 10). Spoofed X-Forwarded-For is ignored. Failure: a JWT issued less than about 2s before a password change or reset stays valid (fails 6/6 in isolation). Frontend (375x667 web preview): login inline error, eye toggle, the whole forgot/reset flow with toast and redirect, login with the new password, Settings change-password (wrong current shows an error, success shows the 'Password changed' toast and the user stays signed in after reload), and the signup <8 error all work. iteration_3 fixes confirmed: premium-active shows 1s after a Test Store purchase; a suspended user deep-linking to /discover lands on /restricted with no ROUTE_NAMES_CHANGED; send_email maps provider errors to 429/400/503 (code review); NativeTabs now imports from expo-router/native-tabs. No deprecated Expo packages found.",
+  "backend_issues": {
+    "critical": [],
+    "minor": [
+      {"endpoint": "POST /api/me/password, POST /api/auth/reset-password (user_from_token)", "issue": "Sessions issued just before a password change are not revoked. The check is int(iat) < int(password_changed_at), with password_changed_at = now()-1s and iat in whole seconds, so any token issued less than about 1-2s before the change stays valid. Reproduced 6/6: log in, immediately POST /me/password, and GET /me with the old token returns 200. Fix: add a password/token version number to the user and the JWT (e.g. 'pwv') and compare it, instead of comparing timestamps."},
+      {"endpoint": "POST /api/auth/reset-password", "issue": "Account enumeration: an existing email with no pending code returns 'Code expired. Request a new one.', while an unknown email returns 'Incorrect code' (checked with maya@bytetalks.app vs a random email). Return the same message in both cases. verify-email has the same pattern."},
+      {"endpoint": "POST /api/auth/forgot-password", "issue": "Timing side channel: existing accounts wait for the email-provider call, unknown emails return instantly. A provider 400/429/503 also reaches the caller only for existing emails. Consider sending in a background task and always returning the generic 200."},
+      {"endpoint": "bcrypt 4.1.3 (hash_pw)", "issue": "max_length=72 counts characters, not bytes. Multi-byte passwords over 72 bytes are silently truncated by bcrypt. Low risk; validate len(password.encode()) <= 72."}
+    ]
+  },
+  "frontend_issues": {
+    "ui_bugs": [
+      {"component": "Change password sheet", "issue": "The 'Current password is incorrect' error shows under the New password field and outlines it in red, because error={pwError} is attached to that field. Show it on change-password-current, or as a sheet-level error.", "testID": "change-password-new-error", "priority": "low"},
+      {"component": "Reset flow navigation", "issue": "After a successful reset, router.replace('/auth/login') swaps out the forgot screen, which had been pushed on top of login. The stack ends up with two login screens (2 login-screen nodes), so Back on the new login screen opens the same login screen again. Use router.back()/dismissTo('/auth/login'), or replace from login. The email is also not pre-filled on login after a reset.", "testID": "login-screen", "priority": "low"}
+    ],
+    "integration_issues": [],
+    "design_issues": [
+      {"screen": "Change password sheet (settings.tsx / sheet.tsx)", "issues": ["The Sheet has no ScrollView. At 375x667 the content plus error text reaches the bottom edge (submit button at y=599-651 of 667). On small phones with the keyboard open, the submit button may be pushed off-screen. Wrap the children in a ScrollView with keyboardShouldPersistTaps='handled'."]},
+      {"screen": "Reset screen (forgot.tsx)", "issues": ["No 'Resend code' or 'Change email' action on the reset screen. A user whose code expired or got locked has to go back manually."]}
+    ],
+    "react_native_issues": []
+  },
+  "test_report_links": [
+    "/app/backend/tests/test_bytetalks_passwords.py",
+    "/app/backend/tests/test_bytetalks_password_ratelimits.py",
+    "/app/backend/tests/seed_pw_ui_user.py",
+    "/app/test_reports/pytest/pytest_passwords.xml",
+    "/app/test_reports/pytest/pytest_password_ratelimits.xml"
+  ],
+  "action_items": [
+    "Make password-change session revocation exact: store a password_version int on the user, put it in the JWT, and reject tokens whose version doesn't match (or compare iat with sub-second precision and drop the -1s offset).",
+    "reset-password (and verify-email): return the same error for unknown emails and for existing emails without a pending code.",
+    "forgot-password: send the email in a background task so existing and unknown emails get the same response and timing.",
+    "settings.tsx: put the server error (e.g. 'Current password is incorrect') on the current-password field, not the new-password field.",
+    "forgot.tsx: after a successful reset, go back to the existing login screen instead of replacing (avoids a duplicate login screen in the stack), and optionally pre-fill the email.",
+    "sheet.tsx: wrap Sheet children in a ScrollView so long sheets stay reachable on small screens with the keyboard open."
+  ],
+  "critical_code_review_comments": [
+    "Codes stored as SHA-256 hashes and compared with compare_digest; lockout after 5 tries; deleted on success. Good.",
+    "Rate-limit IP is the right-most global XFF entry; spoofed XFF was verified as ineffective. Limits are in memory and per process, so they reset on restart and are not shared across workers.",
+    "The per-email reset limit (8/h) is below 5 wrong tries plus a fresh code with 3 tries, so a real user can get locked out for an hour. Acceptable, but consider a clearer message.",
+    "change_password is rate-limited per IP only, not per user."
+  ],
+  "updated_files": [
+    "/app/backend/tests/test_bytetalks_passwords.py (new)",
+    "/app/backend/tests/test_bytetalks_password_ratelimits.py (new)",
+    "/app/backend/tests/seed_pw_ui_user.py (new)"
+  ],
+  "success_rate": {"backend": "94% (17/18; only the token-revocation timing edge case fails)", "frontend": "100% of requested password flows work; 2 low-priority UI issues"},
+  "seed_data_creation": "Temporary users (test_pw_* and delivered@resend.dev, cloned from Noah) were created and then deleted. No demo account password was changed. The backend was restarted at the end to clear rate limits.",
+  "retest_needed": true,
+  "should_main_agent_self_test": true,
+  "context_for_next_testing_agent": "pytest.ini forces -n 2; run the rate-limit suite with -n 0 (it restarts the backend itself before each test). Restart the backend before test_bytetalks_passwords.py: it uses about 7 logins and 9 resets from the same public IP. To get a known reset code, run `python /app/backend/tests/seed_pw_ui_user.py user <pw>` and then `code` (sets 123456 for delivered@resend.dev); `suspend` and `clean` are also available. The browser automation script can call subprocess to seed the DB mid-flow. Inside the change-password sheet, use locator.dispatch_event('click') for the submit button: page.fill plus force-click can scroll the modal and report 'outside of viewport'. The container clock reads Oct 2026.",
+  "rca_of_issue": "Token revocation edge case: user_from_token compares int(iat) < int(password_changed_at.timestamp()), and the change handlers set password_changed_at = now() - 1s. A token issued at T0 is still accepted after a change at T1 when floor(T0) >= floor(T1 - 1), i.e. whenever T1 - T0 is less than about 1-2s. Repro: POST /auth/login, then immediately POST /me/password with that token, then GET /me with the old token returns 200. Mitigation: use a token version claim."
+}

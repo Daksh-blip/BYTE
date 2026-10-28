@@ -1,0 +1,39 @@
+<?xml version="1.0" encoding="utf-8"?><testsuites name="pytest tests"><testsuite name="pytest" errors="0" failures="6" skipped="0" tests="25" time="17.450" timestamp="2026-10-27T19:29:53.728479+00:00" hostname="agent-env-1180bf9b-1e67-4c93-ab86-f178e58e4029"><testcase classname="tests.test_bytetalks_moderation.TestAdminAccess" name="test_admin_login_role" time="0.787" /><testcase classname="tests.test_bytetalks_moderation.TestAdminAccess" name="test_non_admin_403[/admin/stats]" time="0.497" /><testcase classname="tests.test_bytetalks_moderation.TestAdminAccess" name="test_non_admin_403[/admin/reports]" time="0.101" /><testcase classname="tests.test_bytetalks_moderation.TestAdminAccess" name="test_non_admin_403[/admin/appeals]" time="0.301" /><testcase classname="tests.test_bytetalks_moderation.TestAdminAccess" name="test_non_admin_403[/admin/audit]" time="0.075" /><testcase classname="tests.test_bytetalks_moderation.TestAdminAccess" name="test_non_admin_resolve_403" time="0.082" /><testcase classname="tests.test_bytetalks_moderation.TestAdminAccess" name="test_unauth_401" time="0.165" /><testcase classname="tests.test_bytetalks_moderation.TestAdminAccess" name="test_stats_shape" time="0.082" /><testcase classname="tests.test_bytetalks_moderation.TestAdminAccess" name="test_admin_not_in_discover" time="0.259" /><testcase classname="tests.test_bytetalks_moderation.TestAdminAccess" name="test_invalid_actions" time="0.601" /><testcase classname="tests.test_bytetalks_moderation.TestModerationFlow" name="test_flow" time="3.680" /><testcase classname="tests.test_bytetalks_api.TestDating" name="test_discover_prefs_and_modes" time="5.871" /><testcase classname="tests.test_bytetalks_api.TestDating" name="test_swipe_match_undo_messages" time="1.804" /><testcase classname="tests.test_bytetalks_moderation.TestModerationFlow" name="test_ban_and_deny" time="1.005" /><testcase classname="tests.test_bytetalks_moderation.TestModerationFlow" name="test_admin_cannot_action_admin" time="0.386" /><testcase classname="tests.test_bytetalks_api.TestDating" name="test_unmatch_then_rematch" time="0.356" /><testcase classname="tests.test_bytetalks_api.TestAuth" name="test_register_verify_login_flow" time="2.664"><failure message="KeyError: 'token'">tests/test_bytetalks_api.py:89: in test_register_verify_login_flow
+    tok = r = s.post(f"{API}/auth/login", json={"email": email, "password": PW}).json()["token"]
+              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E   KeyError: 'token'</failure></testcase><testcase classname="tests.test_bytetalks_api.TestDating" name="test_block_report_unblock" time="1.027" /><testcase classname="tests.test_bytetalks_api.TestDating" name="test_block_invalid_id_breaks_discover" time="0.427" /><testcase classname="tests.test_bytetalks_api.TestDating" name="test_paused_hidden" time="1.121"><failure message="AssertionError: {&quot;detail&quot;:&quot;Too many attempts. Please wait a bit and try again.&quot;}&#10;assert 429 == 200&#10; +  where 429 = &lt;Response [429]&gt;.status_code">tests/test_bytetalks_api.py:227: in test_paused_hidden
+    b2, _, mb2 = signup("woman", ["man"])
+                 ^^^^^^^^^^^^^^^^^^^^^^^^
+tests/test_bytetalks_api.py:40: in signup
+    assert r.status_code == 200, r.text
+E   AssertionError: {"detail":"Too many attempts. Please wait a bit and try again."}
+E   assert 429 == 200
+E    +  where 429 = &lt;Response [429]&gt;.status_code</failure></testcase><testcase classname="tests.test_bytetalks_api.TestDating" name="test_delete_account" time="1.037"><failure message="AssertionError: {&quot;detail&quot;:&quot;Too many attempts. Please wait a bit and try again.&quot;}&#10;assert 429 == 200&#10; +  where 429 = &lt;Response [429]&gt;.status_code">tests/test_bytetalks_api.py:235: in test_delete_account
+    s, email, me = signup("woman", ["man"])
+                   ^^^^^^^^^^^^^^^^^^^^^^^^
+tests/test_bytetalks_api.py:40: in signup
+    assert r.status_code == 200, r.text
+E   AssertionError: {"detail":"Too many attempts. Please wait a bit and try again."}
+E   assert 429 == 200
+E    +  where 429 = &lt;Response [429]&gt;.status_code</failure></testcase><testcase classname="tests.test_bytetalks_api.TestAuth" name="test_duplicate_register" time="0.308" /><testcase classname="tests.test_bytetalks_api.TestAuth" name="test_seed_login" time="0.145"><failure message="AssertionError: {&quot;detail&quot;:&quot;Too many attempts. Please wait a bit and try again.&quot;}&#10;assert 429 == 200&#10; +  where 429 = &lt;Response [429]&gt;.status_code">tests/test_bytetalks_api.py:98: in test_seed_login
+    s, u = login("leo@bytetalks.app")
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^
+tests/test_bytetalks_api.py:56: in login
+    assert r.status_code == 200, r.text
+E   AssertionError: {"detail":"Too many attempts. Please wait a bit and try again."}
+E   assert 429 == 200
+E    +  where 429 = &lt;Response [429]&gt;.status_code</failure></testcase><testcase classname="tests.test_bytetalks_api.TestProfile" name="test_age_gate_and_onboarding_requirements" time="0.789"><failure message="AssertionError: {&quot;detail&quot;:&quot;Too many attempts. Please wait a bit and try again.&quot;}&#10;assert 429 == 200&#10; +  where 429 = &lt;Response [429]&gt;.status_code">tests/test_bytetalks_api.py:105: in test_age_gate_and_onboarding_requirements
+    s, email, me = signup("man", ["woman"], onboard=False)
+                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+tests/test_bytetalks_api.py:40: in signup
+    assert r.status_code == 200, r.text
+E   AssertionError: {"detail":"Too many attempts. Please wait a bit and try again."}
+E   assert 429 == 200
+E    +  where 429 = &lt;Response [429]&gt;.status_code</failure></testcase><testcase classname="tests.test_bytetalks_api.TestProfile" name="test_photos" time="4.390"><failure message="AssertionError: {&quot;detail&quot;:&quot;Too many attempts. Please wait a bit and try again.&quot;}&#10;assert 429 == 200&#10; +  where 429 = &lt;Response [429]&gt;.status_code">tests/test_bytetalks_api.py:118: in test_photos
+    s, email, me = signup("man", ["woman"], onboard=False)
+                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+tests/test_bytetalks_api.py:40: in signup
+    assert r.status_code == 200, r.text
+E   AssertionError: {"detail":"Too many attempts. Please wait a bit and try again."}
+E   assert 429 == 200
+E    +  where 429 = &lt;Response [429]&gt;.status_code</failure></testcase></testsuite></testsuites>

@@ -10,6 +10,8 @@ import Ionicons from "@react-native-vector-icons/ionicons";
 import { api, photoSource, Profile } from "@/src/api";
 import { useAuth } from "@/src/auth";
 import { usesNativeTabs } from "@/src/navigation";
+import { useSubscription } from "@/src/revenuecat";
+import { LIMITS, recordUse, usedToday } from "@/src/limits";
 import { DISCOVER_MODES } from "@/src/constants";
 import { SwipeCard, SwipeCardHandle, SwipeDir } from "@/src/components/swipe-card";
 import { Button, EmptyState, IconButton } from "@/src/components/ui";
@@ -25,6 +27,8 @@ export default function Discover() {
   const insets = useSafeAreaInsets();
   const toast = useToast();
   const { user } = useAuth();
+  const { isSubscribed } = useSubscription();
+  const [resetKey, setResetKey] = useState(0);
   const bottomChrome = usesNativeTabs ? insets.bottom : 0;
   const [deck, setDeck] = useState<Profile[]>([]);
   const [loading, setLoading] = useState(true);
@@ -39,7 +43,15 @@ export default function Discover() {
     setLoading(true);
     setError(null);
     try {
-      setDeck(await api<Profile[]>(`/discover?mode=${mode}`));
+      const premiumMode = mode === "goals" || mode === "prompts";
+      const list = await api<Profile[]>(`/discover?mode=${premiumMode ? "explore" : mode}`);
+      setDeck(
+        mode === "goals"
+          ? list.filter((p) => p.intention && p.intention === user?.intention)
+          : mode === "prompts"
+            ? list.filter((p) => p.prompts.length > 0)
+            : list,
+      );
     } catch (e: any) {
       setError(e.message);
     } finally {
@@ -66,8 +78,23 @@ export default function Discover() {
     async (dir: SwipeDir) => {
       const target = deck[0];
       if (!target) return;
-      setDeck((d) => d.slice(1));
       const action = dir === "right" ? "like" : dir === "up" ? "superlike" : "pass";
+      if (action !== "pass") {
+        const limit = LIMITS[isSubscribed ? "premium" : "free"][action];
+        if ((await usedToday(action)) >= limit) {
+          setResetKey((k) => k + 1); // bring the card back
+          toast(
+            action === "like"
+              ? "You've used today's 25 free likes. Go Premium for unlimited likes."
+              : `You've used today's ${limit} super-like${limit > 1 ? "s" : ""}.`,
+            "info",
+          );
+          if (!isSubscribed) router.push("/premium");
+          return;
+        }
+        await recordUse(action);
+      }
+      setDeck((d) => d.slice(1));
       setCanUndo(action === "pass");
       if (action === "pass") Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light).catch(() => {});
       else Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success).catch(() => {});
@@ -78,7 +105,7 @@ export default function Discover() {
         toast(e.message, "error");
       }
     },
-    [deck, toast],
+    [deck, toast, isSubscribed, router],
   );
 
   const top = deck[0];
@@ -102,7 +129,13 @@ export default function Discover() {
         {DISCOVER_MODES.map((m) => {
           const on = m.value === mode;
           return (
-            <Pressable key={m.value} testID={`discover-mode-${m.value}`} onPress={() => setMode(m.value)} style={[s.mode, on && s.modeOn]}>
+            <Pressable
+              key={m.value}
+              testID={`discover-mode-${m.value}`}
+              onPress={() => ("premium" in m && m.premium && !isSubscribed ? router.push("/premium") : setMode(m.value))}
+              style={[s.mode, on && s.modeOn]}
+            >
+              {"premium" in m && m.premium && !isSubscribed ? <Ionicons name="lock-closed" size={12} color={colors.warning} /> : null}
               <Ionicons name={m.icon as any} size={14} color={on ? colors.brandPrimary : colors.muted} />
               <Text style={[s.modeText, on && { color: colors.brandPrimary }]}>{m.label}</Text>
             </Pressable>
@@ -134,7 +167,7 @@ export default function Discover() {
             <View style={s.stack}>
               {nextCard ? <SwipeCard key={nextCard.id} profile={nextCard} onSwiped={() => {}} onOpen={() => {}} active={false} /> : null}
               <SwipeCard
-                key={top.id}
+                key={`${top.id}-${resetKey}`}
                 ref={topRef}
                 profile={top}
                 active

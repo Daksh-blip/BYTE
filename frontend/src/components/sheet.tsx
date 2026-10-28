@@ -1,5 +1,5 @@
 import React from "react";
-import { Modal, Platform, Pressable, Text, View } from "react-native";
+import { Modal, Platform, Pressable, ScrollView, Text, View } from "react-native";
 import { KeyboardAvoidingView } from "react-native-keyboard-controller";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 
@@ -27,7 +27,9 @@ export function Sheet({
         <View testID={testID} style={[s.sheet, { paddingBottom: insets.bottom + spacing.lg }]}>
           <View style={s.handle} />
           {title ? <Text style={s.title}>{title}</Text> : null}
-          {children}
+          <ScrollView keyboardShouldPersistTaps="handled" contentContainerStyle={s.content} bounces={false}>
+            {children}
+          </ScrollView>
         </View>
       </KeyboardAvoidingView>
     </Modal>
@@ -67,6 +69,7 @@ const useStyles = makeStyles((c) => ({
   },
   handle: { alignSelf: "center", width: 40, height: 4, borderRadius: 2, backgroundColor: c.borderStrong, marginBottom: spacing.sm },
   title: { color: c.onSurface, fontSize: font.xl, fontWeight: "700", marginBottom: spacing.xs },
+  content: { gap: spacing.md },
   row: { minHeight: 52, justifyContent: "center", borderBottomWidth: 1, borderBottomColor: c.divider },
   rowText: { color: c.onSurface, fontSize: font.lg, fontWeight: "500" },
   danger: { color: c.error },
