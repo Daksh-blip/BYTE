@@ -11,9 +11,10 @@
     "ios": {
       "supportsTablet": true,
       "bundleIdentifier": "com.emergent.meetbypersonality.n45jnb",
+      "usesAppleSignIn": true,
       "infoPlist": {
         "NSPhotoLibraryUsageDescription": "Add photos to your dating profile",
-        "NSCameraUsageDescription": "Take a new photo for your profile"
+        "NSCameraUsageDescription": "Take profile photos and scan device link codes"
       }
     },
     "android": {
@@ -52,7 +53,15 @@
         }
       ],
       "@react-native-vector-icons/ionicons",
+      [
+        "expo-camera",
+        {
+          "cameraPermission": "Take profile photos and scan device link codes",
+          "recordAudioAndroid": false
+        }
+      ],
       "expo-sharing",
+      "expo-apple-authentication",
       [
         "expo-sqlite",
         {

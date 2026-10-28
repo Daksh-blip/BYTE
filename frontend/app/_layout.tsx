@@ -10,6 +10,7 @@ import { KeyboardProvider } from "react-native-keyboard-controller";
 import { ErrorBoundary } from "@/src/components/error-boundary";
 import { ToastProvider } from "@/src/components/toast";
 import { AuthProvider, useAuth } from "@/src/auth";
+import { hasLoginNotice } from "@/src/auth-notice";
 import { queryClient } from "@/src/query-client";
 import { initializeRevenueCat, SubscriptionProvider } from "@/src/revenuecat";
 import { colors } from "@/src/theme";
@@ -31,14 +32,14 @@ function Subscriptions({ children }: { children: React.ReactNode }) {
 
 const PUBLIC_ROUTES = new Set(["", "index", "welcome", "auth", "+html"]);
 
-// Signed-out users opening any protected deep link (or reloading after an auto-logout) go to Welcome.
+// Signed-out users opening any protected deep link go to Welcome; after an auto-logout (login notice pending) they go to login.
 function AuthGuard() {
   const { user } = useAuth();
   const segments = useSegments();
   const router = useRouter();
   const first = segments[0] ?? "";
   useEffect(() => {
-    if (!user && !PUBLIC_ROUTES.has(first)) router.replace("/welcome");
+    if (!user && !PUBLIC_ROUTES.has(first)) router.replace(hasLoginNotice() ? "/auth/login" : "/welcome");
   }, [user, first, router]);
   return null;
 }

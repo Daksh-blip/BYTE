@@ -10,6 +10,11 @@ import Ionicons from "@react-native-vector-icons/ionicons";
 import dayjs from "dayjs";
 
 import { api, MessageT, photoSource, Profile } from "@/src/api";
+import * as ImagePicker from "expo-image-picker";
+import { Linking } from "react-native";
+import { decodePhoto, encodePhoto, isPhoto, mediaStatus, PhotoMsg, uploadEncryptedPhoto } from "@/src/chat-photo";
+import { PhotoBubble } from "@/src/components/photo-bubble";
+import { isLive, onLive, sendTyping } from "@/src/live";
 import { useAuth } from "@/src/auth";
 import { decryptLegacy } from "@/src/e2ee";
 import { FAILED } from "@/src/signal/cache";
@@ -18,22 +23,25 @@ import {
   confirmSafetyNumber,
   hasSessionWith,
   myDevice,
+  useLinkState,
   readSignal,
   safetyNumber,
   sendSignal,
   SignalError,
   unavailableText,
+  updateCached,
   useSignalStatus,
 } from "@/src/signal";
 import { SafetySheet } from "@/src/components/safety-sheet";
+import { AiIdeasSheet } from "@/src/components/ai-ideas-sheet";
 import { Sheet } from "@/src/components/sheet";
 import { Button, IconButton } from "@/src/components/ui";
 import { useToast } from "@/src/components/toast";
 import { makeStyles, useTheme, spacing, radius, font } from "@/src/theme";
 
-type Kind = "text" | "unavailable" | "failed" | "system";
-type Row = { id: string; mine: boolean; text: string; kind: Kind; legacy: boolean; at: string; pending?: boolean };
-type MatchInfo = { user: Profile; protocol: "nacl-box-v1" | "signal-v1" };
+type Kind = "text" | "unavailable" | "failed" | "system" | "photo";
+type Row = { id: string; mine: boolean; text: string; kind: Kind; legacy: boolean; at: string; pending?: boolean; photo?: PhotoMsg };
+type MatchInfo = { user: Profile; protocol: "nacl-box-v1" | "signal-v1"; receipts?: boolean; peer_read_at?: string | null };
 
 export default function Chat() {
   const s = useStyles();
@@ -43,6 +51,7 @@ export default function Chat() {
   const insets = useSafeAreaInsets();
   const { user } = useAuth();
   const status = useSignalStatus();
+  const linkState = useLinkState();
   const { matchId } = useLocalSearchParams<{ matchId: string }>();
   const [match, setMatch] = useState<MatchInfo | null>(null);
   const [rows, setRows] = useState<Row[] | null>(null);
@@ -56,6 +65,11 @@ export default function Chat() {
   const [session, setSession] = useState(false);
   const [safety, setSafety] = useState<{ numeric: string; trustState: string | null; confirmation: unknown } | null>(null);
   const [upgrading, setUpgrading] = useState(false);
+  const [typing, setTyping] = useState(false);
+  const [voOpened, setVoOpened] = useState<Record<string, boolean>>({});
+  const [pendingPhoto, setPendingPhoto] = useState<ImagePicker.ImagePickerAsset | null>(null);
+  const [photoPerm, setPhotoPerm] = useState(false);
+  const [aiOpen, setAiOpen] = useState(false);
   const listRef = useRef<FlatList<Row>>(null);
   const other = match?.user ?? null;
   const isSignal = match?.protocol === "signal-v1";
@@ -72,10 +86,13 @@ export default function Chat() {
       if (m.protocol !== "signal-v1") return { ...base, kind: "failed", text: "Unsupported message format" };
       const t = cache[m.id];
       if (t === FAILED) return { ...base, kind: "failed", text: "This message couldn't be verified and was not shown." };
+      if (t !== undefined && isPhoto(t)) {
+        const photo = decodePhoto(t);
+        return photo ? { ...base, kind: "photo", text: "", photo } : { ...base, kind: "failed", text: "Unsupported photo format" };
+      }
       if (t !== undefined) return { ...base, kind: "text", text: t };
-      const dev = myDevice();
-      const elsewhere = mine ? m.sender_device !== dev : m.recipient_device !== dev;
-      return { ...base, kind: "unavailable", text: elsewhere ? "Encrypted for another of your devices" : "Unlocking…" };
+      if (!m.ciphertext) return { ...base, kind: "unavailable", text: mine ? "Sent from another of your devices before this one was linked" : "Sent before this device was linked" };
+      return { ...base, kind: "unavailable", text: "Unlocking…" };
     },
     [user?.id],
   );
@@ -105,9 +122,75 @@ export default function Chat() {
   useEffect(() => {
     if (!other) return;
     loadMessages();
-    const t = setInterval(loadMessages, 3000);
-    return () => clearInterval(t);
+    const t = setInterval(() => !isLive() && loadMessages(), 3000); // polling only as a fallback when offline from live
+    const slow = setInterval(loadMessages, 20000);
+    return () => {
+      clearInterval(t);
+      clearInterval(slow);
+    };
   }, [other?.id, status, loadMessages]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  const refreshMedia = useCallback(() => {
+    mediaStatus(matchId).then(setVoOpened).catch(() => {});
+  }, [matchId]);
+
+  // Instant delivery: live events trigger fetches; typing + read come only when both people allow receipts.
+  useEffect(() => {
+    refreshMedia();
+    let typingTimer: ReturnType<typeof setTimeout> | undefined;
+    const off = onLive((e) => {
+      if (e.match_id !== matchId) return;
+      if (e.type === "message") {
+        setTyping(false);
+        loadMessages();
+      } else if (e.type === "typing") {
+        setTyping(true);
+        clearTimeout(typingTimer);
+        typingTimer = setTimeout(() => setTyping(false), 4000);
+      } else if (e.type === "read") setMatch((x) => (x ? { ...x, peer_read_at: e.at } : x));
+      else if (e.type === "opened") refreshMedia();
+    });
+    return () => {
+      off();
+      clearTimeout(typingTimer);
+    };
+  }, [matchId, loadMessages, refreshMedia]);
+
+  const pickPhoto = async () => {
+    if (!other || !canType) return;
+    if (Platform.OS !== "web") {
+      const cur = await ImagePicker.getMediaLibraryPermissionsAsync();
+      if (!cur.granted) {
+        const r = cur.canAskAgain ? await ImagePicker.requestMediaLibraryPermissionsAsync() : cur;
+        if (!r.granted) return setPhotoPerm(true);
+      }
+    }
+    const res = await ImagePicker.launchImageLibraryAsync({ mediaTypes: ["images"], quality: 0.7 });
+    if (!res.canceled && res.assets[0]) setPendingPhoto(res.assets[0]);
+  };
+
+  const sendPhoto = async (viewOnce: boolean) => {
+    const asset = pendingPhoto;
+    if (!asset || !other) return;
+    setPendingPhoto(null);
+    setSending(true);
+    try {
+      const payload = await uploadEncryptedPhoto(matchId, asset, viewOnce);
+      await sendSignal(matchId, other.id, encodePhoto(payload));
+      await loadMessages();
+    } catch (e: any) {
+      if (e instanceof SignalError && e.code === "IDENTITY_CHANGED") setNewIdentity(e.identity);
+      else toast(e.message || "Photo not sent", "error");
+    } finally {
+      setSending(false);
+    }
+  };
+
+  const markOpened = (row: Row) => {
+    if (!row.photo) return;
+    // Forget the key locally once a view-once photo was opened.
+    updateCached(matchId, row.id, encodePhoto({ ...row.photo, k: "", n: "", opened: true })).then(() => loadMessages());
+  };
 
   useEffect(() => {
     if (other) hasSessionWith(other.id).then(setSession);
@@ -201,7 +284,10 @@ export default function Chat() {
     );
   }
 
-  const canType = isSignal && status === "ready" && !newIdentity;
+  const canType = isSignal && status === "ready" && !newIdentity && linkState === "active";
+  const lastMine = rows ? [...rows].reverse().find((r) => r.mine && !r.pending) : undefined;
+  const readMark = (r: Row) =>
+    match?.receipts && match.peer_read_at && r.id === lastMine?.id && dayjs(match.peer_read_at).isAfter(dayjs(r.at).subtract(1, "second")) ? " · Read" : "";
   const label = !match ? "" : !isSignal ? "Legacy encryption" : session ? "Signal Protocol · end-to-end encrypted" : "Secure session not set up yet";
 
   return (
@@ -260,6 +346,19 @@ export default function Chat() {
                   <Ionicons name="shield-checkmark" size={14} color={colors.brandPrimary} />
                   <Text style={s.systemText}>{item.text}</Text>
                 </View>
+              ) : item.kind === "photo" && item.photo ? (
+                <View style={[s.bubbleWrap, item.mine ? s.right : s.left]}>
+                  <PhotoBubble
+                    testID={`message-${item.id}`}
+                    photo={item.photo}
+                    mine={item.mine}
+                    serverOpened={voOpened[item.photo.id]}
+                    onViewOnceOpened={() => markOpened(item)}
+                  />
+                  <Text style={s.time}>
+                    {dayjs(item.at).format("h:mm A")} · {item.photo.vo ? "View once · " : ""}Encrypted photo{readMark(item)}
+                  </Text>
+                </View>
               ) : (
                 <View testID={`message-${item.id}`} style={[s.bubbleWrap, item.mine ? s.right : s.left]}>
                   <View style={[s.bubble, item.mine ? s.bubbleMine : s.bubbleTheirs]}>
@@ -268,12 +367,19 @@ export default function Chat() {
                   <Text style={s.time}>
                     {item.pending ? "Sending…" : dayjs(item.at).format("h:mm A")}
                     {item.legacy ? " · Legacy encryption" : ""}
+                    {readMark(item)}
                   </Text>
                 </View>
               )
             }
           />
         )}
+
+        {typing ? (
+          <Text testID="chat-typing" style={s.typing}>
+            {other?.name} is typing…
+          </Text>
+        ) : null}
 
         {newIdentity ? (
           <View style={s.keyChanged} testID="chat-key-changed-banner">
@@ -291,6 +397,13 @@ export default function Chat() {
           <View style={s.waiting} testID="chat-signal-unavailable">
             <Ionicons name={status === "starting" ? "hourglass-outline" : "alert-circle-outline"} size={16} color={colors.warning} />
             <Text style={s.waitingText}>{unavailableText(status)}</Text>
+          </View>
+        ) : null}
+
+        {isSignal && status === "ready" && linkState === "pending" ? (
+          <View style={s.waiting} testID="chat-device-pending">
+            <Ionicons name="phone-portrait-outline" size={16} color={colors.warning} />
+            <Text style={s.waitingText}>This device isn&apos;t linked yet. Approve it from one of your linked devices (Settings › Secure chat devices).</Text>
           </View>
         ) : null}
 
@@ -324,10 +437,19 @@ export default function Chat() {
           </View>
         ) : (
           <View style={[s.composer, { paddingBottom: insets.bottom + spacing.sm }]}>
+            <Pressable testID="chat-photo-button" onPress={pickPhoto} disabled={!canType || sending} style={[s.attach, !canType && { opacity: 0.4 }]} hitSlop={6}>
+              <Ionicons name="image-outline" size={22} color={colors.brandPrimary} />
+            </Pressable>
+            <Pressable testID="chat-ai-button" onPress={() => setAiOpen(true)} disabled={!canType || !other} style={[s.attach, !canType && { opacity: 0.4 }]} hitSlop={6}>
+              <Ionicons name="sparkles-outline" size={22} color={colors.brandPrimary} />
+            </Pressable>
             <TextInput
               testID="chat-message-input"
               value={text}
-              onChangeText={setText}
+              onChangeText={(v) => {
+                setText(v);
+                if (v) sendTyping(matchId);
+              }}
               placeholder={canType ? "Write an encrypted message…" : "Secure chat unavailable"}
               placeholderTextColor={colors.muted}
               editable={canType}
@@ -348,8 +470,25 @@ export default function Chat() {
       </KeyboardAvoidingView>
 
       {other ? (
+        <AiIdeasSheet visible={aiOpen} onClose={() => setAiOpen(false)} matchId={matchId} name={other.name} onPick={setText} />
+      ) : null}
+
+      {other ? (
         <SafetySheet visible={menu} onClose={() => setMenu(false)} userId={other.id} name={other.name} matchId={matchId} onDone={() => goBack("/chats")} />
       ) : null}
+
+      <Sheet visible={!!pendingPhoto} onClose={() => setPendingPhoto(null)} title="Send encrypted photo" testID="photo-send-sheet">
+        <Text style={s.sheetBody}>The photo is encrypted on this device before upload. Only {other?.name ?? "your match"} can open it.</Text>
+        <Button testID="photo-send-normal" title="Send photo" icon="image-outline" onPress={() => sendPhoto(false)} />
+        <Button testID="photo-send-view-once" title="Send as view-once" variant="secondary" icon="eye-outline" onPress={() => sendPhoto(true)} />
+        <Button testID="photo-send-cancel" title="Cancel" variant="ghost" onPress={() => setPendingPhoto(null)} />
+      </Sheet>
+
+      <Sheet visible={photoPerm} onClose={() => setPhotoPerm(false)} title="Allow photo access" testID="photo-perm-sheet">
+        <Text style={s.sheetBody}>To share a photo, allow BYTE TALKS to access your photos in Settings. Everything else in chat still works.</Text>
+        <Button testID="photo-perm-settings" title="Open Settings" onPress={() => Linking.openSettings()} />
+        <Button testID="photo-perm-close" title="Not now" variant="ghost" onPress={() => setPhotoPerm(false)} />
+      </Sheet>
 
       <Sheet visible={lockInfo} onClose={() => setLockInfo(false)} title="Encryption details" testID="e2ee-info-sheet">
         <Text testID="e2ee-info-protocol" style={s.sheetBody}>
@@ -413,6 +552,8 @@ const useStyles = makeStyles((c) => ({
   composer: { flexDirection: "row", alignItems: "flex-end", gap: spacing.sm, paddingHorizontal: spacing.md, paddingTop: spacing.sm, borderTopWidth: 1, borderTopColor: c.divider, backgroundColor: c.surface },
   input: { flex: 1, minHeight: 44, maxHeight: 120, backgroundColor: c.surfaceSecondary, borderRadius: 22, paddingHorizontal: spacing.lg, paddingTop: 12, paddingBottom: 12, color: c.onSurface, fontSize: font.lg },
   send: { width: 44, height: 44, borderRadius: 22, backgroundColor: c.brandPrimary, alignItems: "center", justifyContent: "center" },
+  attach: { width: 44, height: 44, borderRadius: 22, backgroundColor: c.surfaceSecondary, alignItems: "center", justifyContent: "center" },
+  typing: { color: c.brandPrimary, fontSize: font.sm, fontStyle: "italic", marginHorizontal: spacing.lg, marginBottom: spacing.xs },
   sheetBody: { color: c.muted, fontSize: font.base, lineHeight: 20 },
   safetyBox: { backgroundColor: c.surfaceTertiary, borderRadius: radius.md, padding: spacing.lg, gap: spacing.sm },
   safetyLabel: { color: c.muted, fontSize: font.sm, fontWeight: "700", textTransform: "uppercase", letterSpacing: 1 },

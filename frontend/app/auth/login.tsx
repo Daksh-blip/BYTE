@@ -6,6 +6,7 @@ import { api } from "@/src/api";
 import { useAuth } from "@/src/auth";
 import { takeLoginNotice } from "@/src/auth-notice";
 import { AuthShell } from "@/src/components/auth-shell";
+import { SocialButtons } from "@/src/components/social-buttons";
 import { Button, Field } from "@/src/components/ui";
 import { makeStyles, spacing, radius, font } from "@/src/theme";
 
@@ -57,6 +58,7 @@ export default function Login() {
           {notice.message}
         </Text>
       ) : null}
+      <SocialButtons />
       <Field
         testID="login-email-input"
         label="Email"

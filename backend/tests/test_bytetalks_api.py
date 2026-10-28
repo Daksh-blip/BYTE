@@ -99,7 +99,9 @@ class TestAuth:
     def test_duplicate_register(self):
         s = sess()
         r = s.post(f"{API}/auth/register", json={"email": "leo@bytetalks.app", "password": PW, "name": "X"})
-        assert r.status_code == 400
+        # Same response as a new sign-up (no account enumeration); the real account is untouched.
+        assert r.status_code == 200 and "dev_code" not in r.json()
+        assert login("leo@bytetalks.app")[0] is not None
 
     def test_seed_login(self):
         s, u = login("leo@bytetalks.app")
@@ -189,13 +191,13 @@ class TestDating:
         # Enroll Signal devices (server stores public material only; crypto is verified client-side)
         def enroll(s, ch):
             ident = {"version": 1, "x25519PublicKey": ch * 43 + "=", "ed25519PublicKey": ch * 43 + "="}
-            dev = s.post(f"{API}/signal/identity", json={"deviceId": 1, "identity": ident, "registrationId": 42}).json()["device"]
+            dev = s.post(f"{API}/signal/identity", json={"deviceId": 1, "identity": ident, "registrationId": 42, "sigUserId": s.get(f"{API}/me").json()["id"] + "." + ("ab" * 8)}).json()["device"]
             s.headers["X-Signal-Device"] = dev
             return dev
         dev_a, dev_b = enroll(a, "k"), enroll(b, "j")
-        msg = {"protocol": "signal-v1", "ciphertext": base64.b64encode(b"x" * 40).decode(), "recipient_device": dev_b, "plaintext": "SECRET"}
+        msg = {"protocol": "signal-v1", "ciphertexts": {dev_b: base64.b64encode(b"x" * 40).decode()}, "plaintext": "SECRET"}
         # Wrong recipient device must be rejected (no silent send to a stale device)
-        assert a.post(f"{API}/matches/{mid}/messages", json=dict(msg, recipient_device=dev_a)).status_code == 409
+        assert a.post(f"{API}/matches/{mid}/messages", json=dict(msg, ciphertexts={dev_a: "eA=="})).status_code == 409
         r = a.post(f"{API}/matches/{mid}/messages", json=msg)
         assert r.status_code == 200 and "plaintext" not in r.json()
         assert c.post(f"{API}/matches/{mid}/messages", json=msg).status_code == 404

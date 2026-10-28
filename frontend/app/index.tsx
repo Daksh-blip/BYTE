@@ -2,6 +2,7 @@ import { Redirect } from "expo-router";
 import { ActivityIndicator, View } from "react-native";
 
 import { useAuth } from "@/src/auth";
+import { hasLoginNotice } from "@/src/auth-notice";
 import { useTheme } from "@/src/theme";
 
 export default function Index() {
@@ -14,7 +15,7 @@ export default function Index() {
       </View>
     );
   }
-  if (!user) return <Redirect href="/welcome" />;
+  if (!user) return <Redirect href={hasLoginNotice() ? "/auth/login" : "/welcome"} />;
   if (user.role === "admin") return <Redirect href="/admin" />;
   const restricted = user.status === "banned" || (user.status === "suspended" && !!user.suspended_until && new Date(user.suspended_until) > new Date());
   if (restricted) return <Redirect href="/restricted" />;

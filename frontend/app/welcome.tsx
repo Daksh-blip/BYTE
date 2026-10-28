@@ -6,6 +6,7 @@ import Animated, { FadeInDown } from "react-native-reanimated";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import Ionicons from "@react-native-vector-icons/ionicons";
 
+import { SocialButtons } from "@/src/components/social-buttons";
 import { Button } from "@/src/components/ui";
 import { makeStyles, useTheme, spacing, font, radius } from "@/src/theme";
 
@@ -44,7 +45,8 @@ export default function Welcome() {
           ))}
         </Animated.View>
         <Animated.View entering={FadeInDown.delay(300).duration(500)} style={s.actions}>
-          <Button testID="welcome-create-account" title="Create account" onPress={() => router.push("/auth/signup")} />
+          <SocialButtons />
+          <Button testID="welcome-create-account" title="Create account with email" onPress={() => router.push("/auth/signup")} />
           <Button testID="welcome-sign-in" title="I already have an account" variant="secondary" onPress={() => router.push("/auth/login")} />
           <Text style={s.legal}>By continuing you confirm you are 18+ and agree to our Terms and Privacy Policy.</Text>
           <Text testID="welcome-founder" style={s.founder}>

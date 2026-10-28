@@ -59,3 +59,11 @@ Build BYTE TALKS: a privacy-first, conversation-first dating platform for adults
 - MFA.
 - Split `server.py` into routers.
 - Redis-backed rate limiting.
+
+### Done (Oct 2026, session 4)
+- Fixed iteration_7 bugs (auto-logout lands on login with notice, pending status text, takeover revokes pending devices, clearer device list, view-once retry on network errors, per-chat typing throttle).
+- Device linking by scanning a QR code (expo-camera) with 6-digit code fallback.
+- Google sign-in (Emergent managed) and Sign in with Apple (iOS); existing accounts are linked only on a provider-confirmed email; Apple hidden emails get their own account.
+- Claude AI (claude-sonnet-5-5, Emergent LLM key; ANTHROPIC_API_KEY overrides): icebreakers + date ideas in chat, bio helper in Edit profile, AI report review for moderators. Only profile text/report metadata is sent, never messages.
+### Next
+- Prompt-based likes, shared-interest highlights; privacy & notification settings; voice/video intros; data export/deletion verification; split chat screen and server.py.

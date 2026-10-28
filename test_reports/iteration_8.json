@@ -1,0 +1,50 @@
+{
+  "summary": "Iteration 8 tested the iter-7 fixes, QR device linking, Google/Apple sign-in rejection paths and the Claude AI features. Backend: 12/12 pytest pass. They cover Google bogus session -> 401, short session -> 422, Apple invalid token -> 401, expired pending devices hidden from the list except the caller's own, DELETE on a pending device sets pending=false and revokes its session_jti, takeover revokes other active AND pending devices and their sessions, the 3 AI endpoints return the right shapes, non-member -> 404, and ai-summary returns 403 for non-admins, 200 for admin, 404 for an unknown report. Frontend (390x844): all requested flows pass. (1) Remote password change sends the user to /auth/login with a red login-notice, not /welcome. (2) settings-signal-status shows 'Waiting for approval…' when pending and 'Active on this device' after takeover or approval. (3) device-pending-panel shows the QR svg and the 6-digit code. Takeover from the UI also cleared the stale pending devices. Manual code approval from A linked B, and B then showed Active. (4) devices-scan-button opens link-scanner with link-scanner-permission and link-scanner-allow; link-scanner-close closes it. (5) Google button appears on /welcome and /auth/login and redirects to auth.emergentagent.com/oauth/?redirect=<origin>/. /?session_id=bogus -> /api/auth/google 401, no crash, user stays on /welcome signed out. No Apple button on web. (6) chat-ai-button -> ai-ideas-sheet with 3 openers; tapping one fills chat-message-input and closes the sheet; ai-tab-dates shows 3 ideas. edit-bio-ai-button -> ai-bio-0/1; tapping fills edit-bio-input. Admin: admin-ai-summary-button -> admin-ai-summary with admin-ai-risk; admin-ai-apply moved the selected chip from warn to dismiss. Code review: photo-bubble drops the view-once key only on 410/403. No deprecated Expo packages found (no expo-av, expo-barcode-scanner or expo-background-fetch).",
+  "backend_issues": {
+    "critical": [],
+    "minor": [
+      {"endpoint": "rate_limit (login 10/300s per IP, in-memory)", "issue": "All preview test traffic shares one ingress IP, so a few test logins return 'Too many attempts' (429) for every account. I had to restart the backend twice to clear the in-memory counters. This is not a product bug, but test runs are fragile and the counters are not shared across workers or restarts."},
+      {"endpoint": "security_notice emails", "issue": "Backend logs show 'Security notice failed: We couldn't send an email to that address' for the seeded @bytetalks.app accounts. This is expected for fake domains and is only a WARNING."}
+    ]
+  },
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [
+      {"flow": "Google sign-in failure on web", "issue": "src/auth.tsx:48-55: if the /auth/google exchange fails (401), the error is only logged with console.warn. The user gets no toast or notice, and session_id stays in the URL because cleanWebUrl runs only on success. Show a login notice like 'Google sign-in failed' and clean the URL either way.", "affected_testIDs": ["google-sign-in-button", "welcome-screen"]}
+    ],
+    "design_issues": [
+      {"screen": "Settings › Secure chat devices", "issues": [
+        "The device-code-<id> Field is about 210px wide, not full card width. It sits inside the row's flex:1 text column, next to the icon on the left and 'Remove' on the right. Put the code field and Approve button below the row so they span the whole card.",
+        "The device-revoke-<id> 'Remove' text is a small touch target, under 44pt even with hitSlop 8.",
+        "The list shows up to 6 rows including old 'Removed'/'Replaced' devices, which pushes the useful rows down. Consider collapsing or hiding revoked devices."
+      ]},
+      {"screen": "AI ideas / Bio ideas content", "issues": [
+        "Date-idea 'why' text talks about the user in the third person ('Since Maya is in Brooklyn and Leo...'). Change the prompt to address the user as 'you' and the match by name.",
+        "Bio suggestions start with 'Maya, 29, ...', which repeats the name and age already shown on the profile card."
+      ]}
+    ],
+    "react_native_issues": []
+  },
+  "test_report_links": ["/app/backend/tests/test_bytetalks_iter8_social_ai_devices.py", "/app/test_reports/pytest/pytest_iter8.xml"],
+  "action_items": [
+    "auth.tsx: when the Google session exchange fails, show a user-facing error (login notice or toast) and strip session_id from the URL.",
+    "settings.tsx:334-345: lay out the pending-device code Field and Approve button across the full card width, below the row header, and give 'Remove' a 44pt touch target.",
+    "Optional: hide revoked or replaced devices in the devices sheet, or move them into a collapsed list.",
+    "Optional: change the date-ideas prompt to second person, and the bio prompt so it does not start with name and age.",
+    "Optional: server.py is about 1980 lines; split it into routers (auth, signal, admin, ai)."
+  ],
+  "critical_code_review_comments": [
+    "social_user(): linking an existing account by provider-confirmed email is correct. For an unverified existing account it resets the password, which blocks pre-registration takeover. Good.",
+    "auth_apple: links by email only when email_verified is true and the email is not a private relay; otherwise it creates a separate account keyed by apple_sub. Correct.",
+    "photo-bubble.tsx:40-42: onViewOnceOpened is called only on e.status 410/403. ApiError carries the status from openEncryptedPhoto. Fix verified.",
+    "_layout.tsx AuthGuard uses hasLoginNotice() and sends the user to /auth/login. Race fixed (verified in UI).",
+    "takeover: update_many on active OR pending devices, plus jti revocation. Verified with API and UI."
+  ],
+  "updated_files": ["/app/backend/tests/test_bytetalks_iter8_social_ai_devices.py (new)"],
+  "success_rate": {"backend": "100% (12/12)", "frontend": "100% of requested flows; 1 minor integration UX issue and 3 design nits"},
+  "seed_data_creation": "The pytest creates and deletes a synthetic user test_iter8_devices@bytetalks.app plus its device docs. A report from leo on lena was seeded with seed_ui_report.py --report for the admin UI and then dismissed through the API. The UI runs took over maya's devices several times (fresh browser contexts), so maya's previous device rows are now 'Removed'. Ethan's password was changed and restored to ByteTalks123!.",
+  "retest_needed": false,
+  "should_main_agent_self_test": true,
+  "context_for_next_testing_agent": "The login limiter is 10 per 5 min per IP plus 8 per email, in memory. Running pytest and then the UI quickly gives 'Too many attempts'. Fix it with `sudo supervisorctl restart backend` (this clears the counters). Every browser_automation call is a fresh context, so maya starts as a PENDING device: open settings-devices-row and use takeover-password/takeover-submit before chat (chat-ai-button is disabled until the device is active). Seed an open report with backend/tests/seed_ui_report.py --report before testing /admin. Claude responses take about 3-6s. Write screenshots as .jpg (png + quality fails).",
+  "rca_of_issue": "The iteration_7 AuthGuard race is fixed: after the remote password change the user ended on /auth/login with the notice 'You were signed out because your password was changed'. The live connection or background poll got the 401 before the tab tap, and AuthGuard sent the user to /auth/login."
+}

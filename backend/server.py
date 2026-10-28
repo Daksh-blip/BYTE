@@ -1,4 +1,5 @@
 import asyncio
+import json
 import os
 import re
 import uuid
@@ -22,7 +23,7 @@ import jwt
 import requests
 from bson import ObjectId
 from dotenv import load_dotenv
-from fastapi import FastAPI, APIRouter, HTTPException, Depends, Request, UploadFile, File, Query
+from fastapi import FastAPI, APIRouter, HTTPException, Depends, Request, UploadFile, File, Query, WebSocket, WebSocketDisconnect
 from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import Response
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
@@ -33,6 +34,8 @@ from starlette.middleware.cors import CORSMiddleware
 
 ROOT_DIR = Path(__file__).parent
 load_dotenv(ROOT_DIR / ".env")
+
+from ai import ask_json, profile_brief  # noqa: E402  (needs the env loaded first)
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s")
 logger = logging.getLogger("bytetalks")
@@ -110,6 +113,7 @@ class User(BaseDocument):
     pronouns: str = ""
     languages: List[str] = []
     prompts: List[dict] = []
+    receipts: bool = True  # read receipts + typing indicators (reciprocal, like WhatsApp)
     role: str = "user"
     pw_version: int = 0
     status: str = "active"  # active | warned | suspended | banned
@@ -144,6 +148,8 @@ class Message(BaseDocument):
     recipient_public_key: Optional[str] = None
     sender_device: Optional[str] = None
     recipient_device: Optional[str] = None
+    ciphertexts: dict = {}  # signal fan-out: device record id -> ciphertext
+    sender_sig: Optional[str] = None  # sender device's Signal address
     kind: Optional[str] = None  # system events, e.g. "upgraded"
     created_at: datetime = Field(default_factory=now)
 
@@ -207,7 +213,7 @@ def private_profile(u: User) -> dict:
     d = public_profile(u)
     d.update({"email": u.email, "dob": u.dob, "interested_in": u.interested_in, "onboarded": u.onboarded,
               "paused": u.paused, "age_min": u.age_min, "age_max": u.age_max, "verified": u.verified,
-              "role": u.role, "status": u.status, "status_reason": u.status_reason,
+              "role": u.role, "status": u.status, "status_reason": u.status_reason, "receipts": u.receipts,
               "suspended_until": u.suspended_until.isoformat() if u.suspended_until else None})
     return d
 
@@ -255,6 +261,9 @@ def check_pw(p: str, h: str) -> bool:
         return bcrypt.checkpw(p.encode(), h.encode())
     except ValueError:
         return False
+
+
+DUMMY_HASH = bcrypt.hashpw(b"timing-equalizer", bcrypt.gensalt(rounds=12)).decode()
 
 
 def make_token(uid: str, pwv: int = 0, typ: str = "access") -> str:
@@ -562,6 +571,7 @@ class ProfileIn(BaseModel):
     pronouns: Optional[str] = Field(default=None, max_length=20)
     languages: Optional[List[str]] = None
     prompts: Optional[List[dict]] = None
+    receipts: Optional[bool] = None
 
 
 class SwipeIn(BaseModel):
@@ -573,8 +583,7 @@ class SwipeIn(BaseModel):
 class MessageIn(BaseModel):
     # Only Signal messages can be sent. Legacy NaCl sends were retired, so nothing can downgrade.
     protocol: Literal["signal-v1"]
-    ciphertext: str = Field(min_length=1, max_length=20000)
-    recipient_device: str = Field(min_length=1, max_length=40)
+    ciphertexts: dict[str, Annotated[str, Field(min_length=1, max_length=20000)]] = Field(min_length=1, max_length=6)
 
 
 class BlockIn(BaseModel):
@@ -606,7 +615,11 @@ async def register(body: RegisterIn, request: Request):
     email = str(body.email).lower()
     existing = User.from_mongo(await db.users.find_one({"email": email}))
     if existing and existing.verified:
-        raise HTTPException(400, "An account with this email already exists. Try signing in.")
+        # Same response as a new sign-up, so nobody can test which emails have accounts. The owner gets a notice.
+        security_notice(existing, "Someone tried to sign up with your email",
+                        "Someone tried to create a new account with your email. If this was you, sign in or reset your "
+                        "password instead. If not, you can ignore this email.")
+        return {"message": "Verification code sent", "email": email, "email_sent": True}
     if existing:
         await db.users.update_one({"_id": ObjectId(existing.id)},
                                   {"$set": {"password_hash": hash_pw(body.password), "name": body.name.strip()}})
@@ -646,10 +659,87 @@ async def login(body: LoginIn, request: Request):
     rate_limit(request, "login", 10, 300)
     rate_limit_key("login", str(body.email).lower(), 8, 300)
     u = User.from_mongo(await db.users.find_one({"email": str(body.email).lower()}))
-    if not u or not check_pw(body.password, u.password_hash):
+    if not u:
+        check_pw(body.password, DUMMY_HASH)  # equalize timing for unknown emails
+        raise HTTPException(401, "Invalid email or password")
+    if not check_pw(body.password, u.password_hash):
         raise HTTPException(401, "Invalid email or password")
     if not u.verified:
         raise HTTPException(403, "EMAIL_NOT_VERIFIED")
+    return {"token": make_token(u.id, u.pw_version), "user": private_profile(u)}
+
+
+# ---------------------------------------------------------------- social sign-in (Google via Emergent, Apple)
+# Both return the app's own session token. An existing account is signed in only when the provider confirms the email.
+async def social_user(email: str, name: str, extra: dict) -> User:
+    u = User.from_mongo(await db.users.find_one({"email": email}))
+    if u:
+        upd = {**extra, "verified": True}
+        if not u.verified:
+            # An unconfirmed sign-up with this email was never proven to be theirs: drop its password.
+            upd["password_hash"] = hash_pw(secrets.token_urlsafe(32))
+        await db.users.update_one({"_id": ObjectId(u.id)}, {"$set": upd})
+        return User.from_mongo(await db.users.find_one({"_id": ObjectId(u.id)}))
+    doc = User(email=email, password_hash=hash_pw(secrets.token_urlsafe(32)), verified=True, name=name[:40]).to_mongo()
+    doc.update(extra)
+    res = await db.users.insert_one(doc)
+    return User.from_mongo(await db.users.find_one({"_id": res.inserted_id}))
+
+
+class GoogleIn(BaseModel):
+    session_id: str = Field(min_length=8, max_length=512)
+
+
+@api.post("/auth/google")
+async def auth_google(body: GoogleIn, request: Request):
+    rate_limit(request, "google", 20, 300)
+    async with httpx.AsyncClient(timeout=15) as hc:
+        r = await hc.get("https://demobackend.emergentagent.com/auth/v1/env/oauth/session-data",
+                         headers={"X-Session-ID": body.session_id})
+    if r.status_code != 200:
+        raise HTTPException(401, "Google sign-in failed. Please try again.")
+    data = r.json()
+    email = (data.get("email") or "").strip().lower()
+    if not email:
+        raise HTTPException(401, "Google did not share an email address")
+    u = await social_user(email, data.get("name") or "", {"google_linked": True})
+    return {"token": make_token(u.id, u.pw_version), "user": private_profile(u)}
+
+
+APPLE_ISSUER = "https://appleid.apple.com"
+_apple_jwks = jwt.PyJWKClient("https://appleid.apple.com/auth/keys", cache_keys=True, lifespan=3600)
+
+
+class AppleIn(BaseModel):
+    identity_token: str = Field(min_length=20, max_length=5000)
+    name: str = Field(default="", max_length=80)
+
+
+@api.post("/auth/apple")
+async def auth_apple(body: AppleIn, request: Request):
+    rate_limit(request, "apple", 20, 300)
+    audiences = [a.strip() for a in os.environ.get("APPLE_AUDIENCES", "").split(",") if a.strip()]
+    try:
+        key = await run_in_threadpool(_apple_jwks.get_signing_key_from_jwt, body.identity_token)
+        claims = jwt.decode(body.identity_token, key.key, algorithms=["RS256"], audience=audiences, issuer=APPLE_ISSUER)
+    except Exception:
+        raise HTTPException(401, "Apple sign-in failed. Please try again.")
+    sub = claims["sub"]
+    u = User.from_mongo(await db.users.find_one({"apple_sub": sub}))
+    if not u:
+        email = (claims.get("email") or "").strip().lower()
+        confirmed = str(claims.get("email_verified")).lower() == "true"
+        private = str(claims.get("is_private_email")).lower() == "true"
+        if email and confirmed and not private:
+            u = await social_user(email, body.name, {"apple_sub": sub})
+        else:
+            # Hidden (relay) or missing email: a separate account keyed by the Apple ID.
+            if not email or not confirmed or await db.users.find_one({"email": email}):
+                email = f"apple-{hashlib.sha256(sub.encode()).hexdigest()[:16]}@privaterelay.appleid.com"
+            doc = User(email=email, password_hash=hash_pw(secrets.token_urlsafe(32)), verified=True, name=body.name[:40]).to_mongo()
+            doc["apple_sub"] = sub
+            res = await db.users.insert_one(doc)
+            u = User.from_mongo(await db.users.find_one({"_id": res.inserted_id}))
     return {"token": make_token(u.id, u.pw_version), "user": private_profile(u)}
 
 
@@ -846,11 +936,11 @@ async def make_primary(photo_id: str, me: User = Depends(current_user)):
 @api.get("/files/{path:path}")
 async def get_file(path: str, token: Optional[str] = Query(default=None),
                    creds: Optional[HTTPAuthorizationCredentials] = Depends(bearer)):
-    if creds:
-        await user_from_token(creds.credentials)
-    else:
-        await user_from_token(token, "media")
-    if not await db.users.find_one({"photos.path": path}, {"_id": 1}):
+    viewer = await user_from_token(creds.credentials) if creds else await user_from_token(token, "media")
+    owner = await db.users.find_one({"photos.path": path}, {"_id": 1})
+    if not owner:
+        raise HTTPException(404, "File not found")
+    if str(owner["_id"]) != viewer.id and str(owner["_id"]) in await blocked_ids(viewer.id):
         raise HTTPException(404, "File not found")
     content, ctype = await run_in_threadpool(get_object, path)
     return Response(content=content, media_type=ctype, headers={"Cache-Control": "private, max-age=86400"})
@@ -885,6 +975,7 @@ async def delete_account(me: User = Depends(current_user)):
     await db.reports.delete_many({"reporter_id": uid})
     await db.auth_codes.delete_many({"email": me.email})
     await db.signal_devices.delete_many({"user_id": uid})
+    await db.chat_media.delete_many({"match_id": {"$in": match_ids}})
     # Photo files become unreachable (the file route requires a DB record); storage has no delete API.
     await db.users.delete_one({"_id": ObjectId(uid)})
     return {"ok": True}
@@ -1049,7 +1140,11 @@ async def match_detail(match_id: str, me: User = Depends(current_user)):
     m = await load_match(match_id, me)
     other_id = next(u for u in m.users if u != me.id)
     other = User.from_mongo(await db.users.find_one({"_id": oid(other_id)}))
-    return {"id": m.id, "user": public_profile(other), "created_at": m.created_at.isoformat(), "protocol": m.protocol}
+    doc = await db.matches.find_one({"_id": ObjectId(m.id)}, {"read_at": 1})
+    peer_read = (doc.get("read_at") or {}).get(other_id) if other and me.receipts and other.receipts else None
+    return {"id": m.id, "user": public_profile(other), "created_at": m.created_at.isoformat(), "protocol": m.protocol,
+            "receipts": bool(other and me.receipts and other.receipts),
+            "peer_read_at": peer_read.replace(tzinfo=timezone.utc).isoformat() if peer_read else None}
 
 
 @api.delete("/matches/{match_id}")
@@ -1057,30 +1152,40 @@ async def unmatch(match_id: str, me: User = Depends(current_user)):
     m = await load_match(match_id, me)
     await db.matches.update_one({"_id": ObjectId(m.id)}, {"$set": {"active": False}})
     await db.messages.delete_many({"match_id": m.id})
+    await db.chat_media.delete_many({"match_id": m.id})
     # Clear likes between the pair so an unmatch never silently rematches.
     await db.swipes.delete_many({"$or": [{"from_id": m.users[0], "to_id": m.users[1]}, {"from_id": m.users[1], "to_id": m.users[0]}]})
     return {"ok": True}
 
 
-def msg_out(m: Message) -> dict:
+def msg_out(m: Message, device: str = "") -> dict:
     out = {"id": m.id, "sender_id": m.sender_id, "protocol": m.protocol, "created_at": m.created_at.isoformat()}
     if m.protocol == LEGACY_PROTOCOL:
         out.update(ciphertext=m.ciphertext, nonce=m.nonce, sender_public_key=m.sender_public_key,
                    recipient_public_key=m.recipient_public_key)
     elif m.protocol == SIGNAL_PROTOCOL:
-        out.update(ciphertext=m.ciphertext, sender_device=m.sender_device, recipient_device=m.recipient_device)
+        cts = m.ciphertexts or ({m.recipient_device: m.ciphertext} if m.recipient_device else {})
+        # Each device only receives the ciphertext addressed to it.
+        out.update(ciphertext=cts.get(device), sender_device=m.sender_device, sender_sig=m.sender_sig or m.sender_id,
+                   recipient_device=device if device in cts else None)
     else:
         out.update(kind=m.kind)
     return out
 
 
 @api.get("/matches/{match_id}/messages")
-async def get_messages(match_id: str, me: User = Depends(current_user)):
+async def get_messages(match_id: str, request: Request, me: User = Depends(current_user)):
     m = await load_match(match_id, me)
     msgs = [Message.from_mongo(d) async for d in db.messages.find({"match_id": m.id}).sort("created_at", 1).limit(500)]
     if m.unread.get(me.id):
         await db.matches.update_one({"_id": ObjectId(m.id)}, {"$set": {f"unread.{me.id}": 0}})
-    return [msg_out(x) for x in msgs]
+    if msgs and msgs[-1].sender_id != me.id:
+        at = now()
+        await db.matches.update_one({"_id": ObjectId(m.id)}, {"$set": {f"read_at.{me.id}": at}})
+        other_id = next(u for u in m.users if u != me.id)
+        if await receipts_on(me.id, other_id):
+            await hub.send(other_id, {"type": "read", "match_id": m.id, "at": at.isoformat()})
+    return [msg_out(x, request_device(request)) for x in msgs]
 
 
 @api.post("/matches/{match_id}/upgrade-encryption")
@@ -1096,9 +1201,124 @@ async def upgrade_encryption(match_id: str, me: User = Depends(current_user)):
     return {"protocol": SIGNAL_PROTOCOL}
 
 
+# ---------------------------------------------------------------- live delivery (WebSocket)
+# Carries only content-free events: "new message in match X", "typing", "read at". Never ciphertext or plaintext.
+class Hub:
+    def __init__(self):
+        self.conns: dict = defaultdict(set)
+
+    async def send(self, uid: str, event: dict):
+        for ws in list(self.conns.get(uid, ())):
+            try:
+                await ws.send_json(event)
+            except Exception:  # noqa: BLE001
+                self.conns[uid].discard(ws)
+
+
+hub = Hub()
+
+
+async def receipts_on(a: str, b: str) -> bool:
+    n = await db.users.count_documents({"_id": {"$in": [oid(a), oid(b)]}, "receipts": {"$ne": False}})
+    return n == 2
+
+
+@app.websocket("/api/ws")
+async def ws_endpoint(ws: WebSocket):
+    await ws.accept()
+    try:
+        # The token arrives in the first frame (not the URL), so it never lands in access logs.
+        first = await asyncio.wait_for(ws.receive_json(), timeout=10)
+        token = first.get("token") if isinstance(first, dict) else None
+        me = await user_from_token(token)
+        if is_restricted(me):
+            raise HTTPException(403, "ACCOUNT_RESTRICTED")
+    except Exception:  # noqa: BLE001
+        await ws.close(code=4401)
+        return
+    hub.conns[me.id].add(ws)
+    await ws.send_json({"type": "ready"})
+    last_typing: dict = {}
+    try:
+        while True:
+            ev = await ws.receive_json()
+            # Re-validate the session on every frame: a password change or device removal closes the socket.
+            try:
+                me = await user_from_token(token)
+            except HTTPException:
+                await ws.close(code=4401)
+                return
+            if not isinstance(ev, dict) or ev.get("type") != "typing":
+                continue
+            mid = str(ev.get("match_id", ""))
+            t = time.time()
+            if t - last_typing.get(mid, 0) < 2:
+                continue
+            last_typing[mid] = t
+            try:
+                m = await load_match(mid, me)
+            except HTTPException:
+                continue
+            other_id = next(u for u in m.users if u != me.id)
+            if other_id not in await blocked_ids(me.id) and await receipts_on(me.id, other_id):
+                await hub.send(other_id, {"type": "typing", "match_id": m.id})
+    except (WebSocketDisconnect, RuntimeError, ValueError):
+        pass
+    finally:
+        hub.conns[me.id].discard(ws)
+
+
+# ---------------------------------------------------------------- encrypted chat photos
+# The phone encrypts each photo (XChaCha20-Poly1305, random key) before upload. The key travels only inside the
+# Signal-encrypted message, so the server stores opaque bytes it cannot open.
+MAX_MEDIA = 10 * 1024 * 1024 + 64
+
+
+@api.post("/matches/{match_id}/media")
+async def upload_media(match_id: str, request: Request, view_once: bool = Query(default=False), me: User = Depends(current_user)):
+    m = await load_match(match_id, me)
+    if m.protocol != SIGNAL_PROTOCOL:
+        raise HTTPException(409, "UPGRADE_REQUIRED")
+    other_id = next(u for u in m.users if u != me.id)
+    if other_id in await blocked_ids(me.id):
+        raise HTTPException(403, "You can't message this person")
+    rate_limit_key("media", me.id, 60, 3600)
+    data = await request.body()
+    if not data or len(data) > MAX_MEDIA:
+        raise HTTPException(400, "Photo must be under 10 MB")
+    path = f"{APP_NAME}/chat/{m.id}/{uuid.uuid4()}.bin"
+    await run_in_threadpool(put_object, path, data, "application/octet-stream")
+    res = await db.chat_media.insert_one({"match_id": m.id, "owner_id": me.id, "path": path, "size": len(data),
+                                          "view_once": view_once, "opened": False, "created_at": now()})
+    return {"id": str(res.inserted_id), "view_once": view_once}
+
+
+@api.get("/media/{media_id}")
+async def download_media(media_id: str, me: User = Depends(current_user)):
+    d = await db.chat_media.find_one({"_id": oid(media_id)})
+    if not d:
+        raise HTTPException(404, "Not found")
+    m = await load_match(d["match_id"], me)  # participants of an active match only
+    if d["view_once"]:
+        if d["owner_id"] == me.id:
+            raise HTTPException(403, "View-once photos can only be opened by the recipient")
+        # Atomic: only the first open succeeds.
+        if not await db.chat_media.find_one_and_update({"_id": d["_id"], "opened": False}, {"$set": {"opened": True, "opened_at": now()}}):
+            raise HTTPException(410, "This view-once photo was already opened")
+        await hub.send(d["owner_id"], {"type": "opened", "match_id": m.id, "media_id": media_id})
+    content, _ = await run_in_threadpool(get_object, d["path"])
+    return Response(content=content, media_type="application/octet-stream", headers={"Cache-Control": "no-store"})
+
+
+@api.get("/matches/{match_id}/media-status")
+async def media_status(match_id: str, me: User = Depends(current_user)):
+    m = await load_match(match_id, me)
+    return {str(d["_id"]): d["opened"] async for d in db.chat_media.find({"match_id": m.id, "view_once": True}, {"opened": 1})}
+
+
 # ---------------------------------------------------------------- Signal relay (public keys + routing only)
-# One active Signal device per account (deviceId 1). Enrolling a new device replaces the old one, and peers
-# see an identity-change warning. The server never receives private keys or plaintext.
+# Up to MAX_DEVICES linked Signal devices per account, each with its own identity and address. A new device stays
+# pending until a linked device approves it (QR scan or code). The server never receives private keys or plaintext.
 B64 = r"^[A-Za-z0-9+/=]+$"
 
 
@@ -1114,6 +1334,10 @@ class ProvisionIn(BaseModel):
     registrationId: int = Field(ge=1, le=16380)
     identityType: Literal["aci"] = "aci"
     platform: str = Field(default="", max_length=20)
+    sigUserId: str = Field(pattern=r"^[a-f0-9]{24}\.[a-f0-9]{16}$")
+
+
+MAX_DEVICES = 3
 
 
 class PreKeyIn(BaseModel):
@@ -1134,16 +1358,12 @@ def request_device(request: Request) -> str:
     return request.headers.get("x-signal-device", "")
 
 
-async def active_device(uid: str) -> Optional[dict]:
-    return await db.signal_devices.find_one({"user_id": uid, "active": True})
-
-
 async def my_device(request: Request, me: User) -> dict:
     dev_id = request_device(request)
     d = await db.signal_devices.find_one({"_id": oid(dev_id), "user_id": me.id}) if dev_id else None
     if not d:
         raise HTTPException(409, "DEVICE_UNKNOWN")
-    if not d.get("active"):
+    if not d.get("active") and not d.get("pending"):
         raise HTTPException(409, "DEVICE_REVOKED")
     return d
 
@@ -1163,42 +1383,128 @@ def _meta(k: Optional[dict]):
 
 
 def device_out(d: dict, current: str = "") -> dict:
-    return {"id": str(d["_id"]), "platform": d.get("platform", ""), "active": d.get("active", False),
+    return {"id": str(d["_id"]), "platform": d.get("platform", ""), "active": d.get("active", False), "pending": d.get("pending", False),
             "created_at": d["created_at"].isoformat(), "revoked_at": d["revoked_at"].isoformat() if d.get("revoked_at") else None,
             "revoked_reason": d.get("revoked_reason"), "current": str(d["_id"]) == current}
 
 
 @api.post("/signal/identity")
 async def signal_provision(body: ProvisionIn, request: Request, me: User = Depends(current_user)):
+    """Each device has its own identity + Signal address (sigUserId = "<user id>.<random>").
+    The first device is active at once. Any later device stays PENDING until an already-active device approves it
+    with the one-time code shown on the new device (or the user re-enters the password to take over)."""
+    if not body.sigUserId.startswith(me.id + "."):
+        raise HTTPException(400, "Invalid device address")
     ident = body.identity.model_dump()
-    cur = await active_device(me.id)
-    if cur and cur["identity"] == ident and cur["registration_id"] == body.registrationId:
-        return {"device": str(cur["_id"]), "created": False}
-    had_device = cur is not None
-    await db.signal_devices.update_many({"user_id": me.id, "active": True},
-                                        {"$set": {"active": False, "revoked_at": now(), "revoked_reason": "replaced",
-                                                  "ec": [], "kem": []}})
+    same = await db.signal_devices.find_one({"user_id": me.id, "sig_uid": body.sigUserId, "identity": ident,
+                                             "registration_id": body.registrationId, "$or": [{"active": True}, {"pending": True}]})
+    if same:
+        return {"device": str(same["_id"]), "status": "active" if same.get("active") else "pending", "created": False}
+    first = not await db.signal_devices.find_one({"user_id": me.id, "active": True}, {"_id": 1})
+    if not first and await db.signal_devices.count_documents({"user_id": me.id, "active": True}) >= MAX_DEVICES:
+        raise HTTPException(409, "You can link up to 3 devices. Remove one in Settings first.")
+    # A re-provision from this same install replaces its own previous record.
+    await db.signal_devices.update_many({"user_id": me.id, "sig_uid": body.sigUserId},
+                                        {"$set": {"active": False, "pending": False, "revoked_at": now(), "revoked_reason": "replaced", "ec": [], "kem": []}})
+    code = None if first else f"{secrets.randbelow(1_000_000):06d}"
     res = await db.signal_devices.insert_one({
-        "user_id": me.id, "device_id": 1, "identity": ident, "registration_id": body.registrationId, "active": True,
-        "platform": body.platform, "session_jti": token_jti(request), "created_at": now(),
-        "spk": None, "lr": None, "ec": [], "kem": []})
-    if had_device:
-        security_notice(me, "A new device was set up for secure chat",
-                        "A new device was just set up for your encrypted chats, replacing the previous one. "
-                        "If this was not you, change your password straight away.")
-    return {"device": str(res.inserted_id), "created": True}
+        "user_id": me.id, "device_id": 1, "sig_uid": body.sigUserId, "identity": ident, "registration_id": body.registrationId,
+        "active": first, "pending": not first, "link_code": digest(code) if code else None, "link_attempts": 0,
+        "link_expires": now() + timedelta(minutes=15), "platform": body.platform, "session_jti": token_jti(request),
+        "created_at": now(), "spk": None, "lr": None, "ec": [], "kem": []})
+    if not first:
+        security_notice(me, "A new device wants to join your secure chats",
+                        "A new device asked to be linked to your encrypted chats. It can only read messages after you approve "
+                        "it from a device you already use. If this was not you, change your password straight away.")
+    return {"device": str(res.inserted_id), "status": "active" if first else "pending", "code": code, "created": True}
+
+
+class ApproveIn(BaseModel):
+    code: str = Field(min_length=6, max_length=6)
+
+
+@api.post("/signal/devices/{device_id}/approve")
+async def signal_approve(device_id: str, body: ApproveIn, request: Request, me: User = Depends(current_user)):
+    approver = await my_device(request, me)
+    if not approver.get("active"):
+        raise HTTPException(403, "Only an already-linked device can approve")
+    d = await db.signal_devices.find_one({"_id": oid(device_id), "user_id": me.id, "pending": True})
+    if not d or d["link_expires"].replace(tzinfo=timezone.utc) < now() or d.get("link_attempts", 0) >= 5:
+        raise HTTPException(400, "This link request expired. Start again on the new device.")
+    if not d.get("link_code") or not secrets.compare_digest(d["link_code"], digest(body.code.strip())):
+        await db.signal_devices.update_one({"_id": d["_id"]}, {"$inc": {"link_attempts": 1}})
+        raise HTTPException(400, "Incorrect code")
+    if await db.signal_devices.count_documents({"user_id": me.id, "active": True}) >= MAX_DEVICES:
+        raise HTTPException(409, "You can link up to 3 devices. Remove one first.")
+    await db.signal_devices.update_one({"_id": d["_id"], "pending": True},
+                                       {"$set": {"active": True, "pending": False, "link_code": None, "linked_at": now(),
+                                                 "approved_by": str(approver["_id"])}})
+    return {"ok": True, "sig_uid": d["sig_uid"]}
+
+
+class TakeoverIn(BaseModel):
+    password: str = Field(max_length=72)
+
+
+@api.post("/signal/takeover")
+async def signal_takeover(body: TakeoverIn, request: Request, me: User = Depends(current_user)):
+    """Lost your other devices? Re-enter the password to make this pending device the only one (others are removed)."""
+    rate_limit_key("takeover", me.id, 5, 900)
+    if not check_pw(body.password, me.password_hash):
+        raise HTTPException(400, "Incorrect password")
+    d = await my_device(request, me)
+    live = {"user_id": me.id, "_id": {"$ne": d["_id"]}, "$or": [{"active": True}, {"pending": True}]}
+    others = [x async for x in db.signal_devices.find(live)]
+    await db.signal_devices.update_many(live, {"$set": {"active": False, "pending": False, "link_code": None, "revoked_at": now(),
+                                                        "revoked_reason": "revoked", "ec": [], "kem": []}})
+    for x in others:
+        if x.get("session_jti"):
+            await db.revoked_sessions.update_one({"jti": x["session_jti"]}, {"$set": {"jti": x["session_jti"], "at": now()}}, upsert=True)
+    await db.signal_devices.update_one({"_id": d["_id"]}, {"$set": {"active": True, "pending": False, "link_code": None}})
+    security_notice(me, "Your secure chat devices were reset",
+                    "All other devices were removed from your encrypted chats and signed out. If this was not you, reset your password now.")
+    return {"ok": True}
+
+
+class SyncIn(BaseModel):
+    device: str = Field(min_length=1, max_length=40)
+    ciphertext: str = Field(min_length=1, max_length=400_000)
+
+
+@api.post("/signal/sync")
+async def signal_sync_post(body: SyncIn, request: Request, me: User = Depends(current_user)):
+    """History transfer between your own devices: Signal-encrypted on the sender device, opaque to the server."""
+    src = await my_device(request, me)
+    dst = await db.signal_devices.find_one({"_id": oid(body.device), "user_id": me.id, "active": True})
+    if not src.get("active") or not dst:
+        raise HTTPException(404, "Device not found")
+    rate_limit_key("sync", me.id, 200, 3600)
+    await db.signal_sync.insert_one({"user_id": me.id, "to": body.device, "from_sig": src["sig_uid"], "ciphertext": body.ciphertext, "at": now()})
+    await hub.send(me.id, {"type": "sync"})
+    return {"ok": True}
+
+
+@api.get("/signal/sync")
+async def signal_sync_get(request: Request, me: User = Depends(current_user)):
+    d = await my_device(request, me)
+    out = [{"id": str(x["_id"]), "from_sig": x["from_sig"], "ciphertext": x["ciphertext"]}
+           async for x in db.signal_sync.find({"user_id": me.id, "to": str(d["_id"])}).sort("at", 1).limit(50)]
+    if out:
+        await db.signal_sync.delete_many({"_id": {"$in": [ObjectId(x["id"]) for x in out]}})
+    return out
 
 
 @api.get("/signal/device-status")
 async def signal_device_status(device: str = Query(...), me: User = Depends(current_user)):
     d = await db.signal_devices.find_one({"_id": oid(device), "user_id": me.id})
-    return {"active": bool(d and d.get("active")), "revoked_reason": d.get("revoked_reason") if d else "unknown"}
+    return {"active": bool(d and d.get("active")), "pending": bool(d and d.get("pending")),
+            "revoked_reason": d.get("revoked_reason") if d else "unknown"}
 
 
 @api.get("/signal/inventory")
 async def signal_inventory(request: Request, me: User = Depends(current_user)):
     dev_id = request_device(request)
-    d = await db.signal_devices.find_one({"_id": oid(dev_id), "user_id": me.id, "active": True}) if dev_id else None
+    d = await db.signal_devices.find_one({"_id": oid(dev_id), "user_id": me.id, "$or": [{"active": True}, {"pending": True}]}) if dev_id else None
     if not d:
         return {"ecSignedPreKey": None, "kemLastResortPreKey": None, "ecOneTimePreKeyCount": 0, "kemOneTimePreKeyCount": 0}
     return {"ecSignedPreKey": _meta(d.get("spk")), "kemLastResortPreKey": _meta(d.get("lr")),
@@ -1232,7 +1538,7 @@ async def signal_upload_prekeys(body: PreKeysIn, request: Request, me: User = De
     if pushes:
         upd["$push"] = pushes
     if upd:
-        await db.signal_devices.update_one({"_id": d["_id"], "active": True}, upd)
+        await db.signal_devices.update_one({"_id": d["_id"], "$or": [{"active": True}, {"pending": True}]}, upd)
     return {"ok": True}
 
 
@@ -1246,21 +1552,24 @@ async def signal_clear_kem(request: Request, me: User = Depends(current_user)):
 @api.get("/signal/identity/{user_id}")
 async def signal_identity(user_id: str, me: User = Depends(current_user)):
     await require_contact(me, user_id)
-    d = await active_device(user_id)
-    if not d:
-        return {"identity": None, "device": None, "registrationId": None}
-    return {"identity": d["identity"], "device": str(d["_id"]), "registrationId": d["registration_id"]}
+    devs = [{"device": str(d["_id"]), "sig_uid": d.get("sig_uid") or user_id, "identity": d["identity"]}
+            async for d in db.signal_devices.find({"user_id": user_id, "active": True}).sort("created_at", 1)]
+    first = devs[0] if devs else None
+    return {"devices": devs, "identity": first and first["identity"], "device": first and first["device"]}
 
 
 @api.post("/signal/bundle/{user_id}")
-async def signal_bundle(user_id: str, me: User = Depends(current_user)):
+async def signal_bundle(user_id: str, request: Request, device: Optional[str] = Query(default=None), me: User = Depends(current_user)):
     await require_contact(me, user_id)
-    if user_id == me.id:
+    if device and device == request_device(request):
         raise HTTPException(400, "Cannot fetch your own bundle")
-    rate_limit_key("bundle", me.id, 60, 3600)
+    if user_id == me.id and not device:
+        raise HTTPException(400, "Cannot fetch your own bundle")
+    rate_limit_key("bundle", me.id, 120, 3600)
+    q = {"user_id": user_id, "active": True, **({"_id": oid(device)} if device else {})}
     # Atomically consume one EC and one KEM one-time prekey (the pre-update document holds the popped ones).
-    d = await db.signal_devices.find_one_and_update({"user_id": user_id, "active": True}, {"$pop": {"ec": -1, "kem": -1}},
-                                                    return_document=ReturnDocument.BEFORE)
+    d = await db.signal_devices.find_one_and_update(q, {"$pop": {"ec": -1, "kem": -1}},
+                                                    return_document=ReturnDocument.BEFORE, sort=[("created_at", 1)])
     if not d or not d.get("spk") or not d.get("lr"):
         raise HTTPException(409, "NO_SECURE_DEVICE")
     ec, kem = (d.get("ec") or [None])[0], (d.get("kem") or [None])[0]
@@ -1277,7 +1586,10 @@ async def signal_bundle(user_id: str, me: User = Depends(current_user)):
 async def signal_devices(request: Request, me: User = Depends(current_user)):
     cur = request_device(request)
     docs = [d async for d in db.signal_devices.find({"user_id": me.id}).sort("created_at", -1).limit(20)]
-    return [device_out(d, cur) for d in docs]
+    # Expired link requests can never be approved; hide them (except this device's own record).
+    live = [d for d in docs if not (d.get("pending") and str(d["_id"]) != cur
+                                    and d["link_expires"].replace(tzinfo=timezone.utc) < now())]
+    return [device_out(d, cur) for d in live]
 
 
 @api.delete("/signal/devices/{device_id}")
@@ -1290,7 +1602,7 @@ async def signal_revoke(device_id: str, request: Request, me: User = Depends(cur
     d = await db.signal_devices.find_one({"_id": oid(device_id), "user_id": me.id})
     if not d:
         raise HTTPException(404, "Device not found")
-    await db.signal_devices.update_one({"_id": d["_id"]}, {"$set": {"active": False, "revoked_at": now(),
+    await db.signal_devices.update_one({"_id": d["_id"]}, {"$set": {"active": False, "pending": False, "link_code": None, "revoked_at": now(),
                                                                     "revoked_reason": "revoked", "ec": [], "kem": []}})
     # Also end that device's login session, so it can't quietly re-enroll without the password.
     if d.get("session_jti"):
@@ -1307,19 +1619,25 @@ async def send_message(match_id: str, body: MessageIn, request: Request, me: Use
         raise HTTPException(403, "You can't message this person")
     if m.protocol != SIGNAL_PROTOCOL:
         raise HTTPException(409, "UPGRADE_REQUIRED")
-    mine = await active_device(me.id)
-    if not mine or mine["_id"] != oid(request_device(request)):
+    mine = await my_device(request, me)
+    if not mine.get("active"):
         raise HTTPException(409, "DEVICE_NOT_ACTIVE")
-    theirs = await active_device(other_id)
-    if not theirs or str(theirs["_id"]) != body.recipient_device:
+    # Fan-out: one ciphertext per recipient device and per *other* device of the sender (sync copy).
+    expected = {str(d["_id"]) async for d in db.signal_devices.find(
+        {"$or": [{"user_id": other_id}, {"user_id": me.id, "_id": {"$ne": mine["_id"]}}], "active": True}, {"_id": 1})}
+    if not await db.signal_devices.find_one({"user_id": other_id, "active": True}, {"_id": 1}):
         raise HTTPException(409, "RECIPIENT_DEVICE_CHANGED")
+    if set(body.ciphertexts) != expected:
+        raise HTTPException(409, "DEVICE_SET_CHANGED")
     # Routing metadata is set by the server from trusted context, never taken from the client.
-    msg = Message(match_id=m.id, sender_id=me.id, protocol=SIGNAL_PROTOCOL, ciphertext=body.ciphertext,
-                  sender_device=str(mine["_id"]), recipient_device=body.recipient_device)
+    msg = Message(match_id=m.id, sender_id=me.id, protocol=SIGNAL_PROTOCOL, ciphertexts=body.ciphertexts,
+                  sender_device=str(mine["_id"]), sender_sig=mine.get("sig_uid") or me.id)
     res = await db.messages.insert_one(msg.to_mongo())
     msg.id = str(res.inserted_id)
     await db.matches.update_one({"_id": ObjectId(m.id)}, {"$set": {"last_message_at": msg.created_at, "last_sender_id": me.id},
                                                           "$inc": {f"unread.{other_id}": 1}})
+    # Live delivery: a content-free nudge; clients fetch the ciphertext through the normal authorized API.
+    await hub.send(other_id, {"type": "message", "match_id": m.id})
     return msg_out(msg)
 
 
@@ -1542,6 +1860,7 @@ async def seed_likes_for(u: User):
 @app.on_event("startup")
 async def startup():
     await db.users.create_index("email", unique=True)
+    await db.users.create_index("apple_sub", unique=True, partialFilterExpression={"apple_sub": {"$type": "string"}})
     await db.swipes.create_index([("from_id", 1), ("to_id", 1)], unique=True)
     await db.swipes.create_index("to_id")
     await db.matches.create_index("users")
@@ -1550,6 +1869,13 @@ async def startup():
     await db.signal_devices.create_index([("user_id", 1), ("active", 1)])
     await db.revoked_sessions.create_index("jti", unique=True)
     await db.revoked_sessions.create_index("at", expireAfterSeconds=(JWT_DAYS + 1) * 86400)
+    # Versioned migration 2026-10-multidevice: single-device records (no Signal address) can't take part in
+    # per-device fan-out, so they're retired (not deleted); those devices re-enroll automatically on next start.
+    # Rollback: set active=True on records with revoked_reason="migrated".
+    if not await db.migrations.find_one({"_id": "2026-10-multidevice"}):
+        await db.signal_devices.update_many({"active": True, "sig_uid": {"$exists": False}},
+                                            {"$set": {"active": False, "revoked_at": now(), "revoked_reason": "migrated"}})
+        await db.migrations.insert_one({"_id": "2026-10-multidevice", "at": now()})
     await seed()
     await seed_admin()
     try:
@@ -1559,8 +1885,99 @@ async def startup():
         logger.error("Storage init failed: %s", e)
 
 
+# ---------------------------------------------------------------- Claude AI helpers (profile text + report metadata only)
+async def ai_call(system: str, prompt: str):
+    try:
+        return await ask_json(system, prompt)
+    except Exception as e:
+        logger.warning("AI request failed: %s", type(e).__name__)
+        raise HTTPException(503, "AI suggestions are unavailable right now. Please try again.")
+
+
+async def match_pair(match_id: str, me: User):
+    m = await load_match(match_id, me)
+    other = User.from_mongo(await db.users.find_one({"_id": oid(next(u for u in m.users if u != me.id))}))
+    if not other:
+        raise HTTPException(404, "Not found")
+    return profile_brief(public_profile(me)), profile_brief(public_profile(other)), compatibility(me, other)["shared_interests"]
+
+
+@api.post("/ai/icebreakers/{match_id}")
+async def ai_icebreakers(match_id: str, me: User = Depends(current_user)):
+    rate_limit_key("ai", me.id, 30, 3600)
+    mine, theirs, shared = await match_pair(match_id, me)
+    out = await ai_call(
+        "You write warm, specific, respectful opening messages for a dating app. Each under 140 characters, no pickup lines, "
+        "no comments on looks, no emojis overload. Reference something concrete from their profile.",
+        f"Me: {json.dumps(mine)}\nThem: {json.dumps(theirs)}\nShared interests: {shared}\n"
+        'Return {"icebreakers": ["...", "...", "..."]} with 3 openers I could send them.')
+    items = [str(x).strip()[:200] for x in (out.get("icebreakers") or []) if str(x).strip()][:3]
+    if not items:
+        raise HTTPException(503, "AI suggestions are unavailable right now. Please try again.")
+    return {"icebreakers": items}
+
+
+@api.post("/ai/date-ideas/{match_id}")
+async def ai_date_ideas(match_id: str, me: User = Depends(current_user)):
+    rate_limit_key("ai", me.id, 30, 3600)
+    mine, theirs, shared = await match_pair(match_id, me)
+    out = await ai_call(
+        "You suggest safe, low-pressure first-date ideas in public places for two people who matched on a dating app. "
+        "Write to Person A as 'you' and refer to Person B by first name. Never mention Person A's name.",
+        f"Person A: {json.dumps(mine)}\nPerson B: {json.dumps(theirs)}\nShared interests: {shared}\n"
+        'Return {"ideas": [{"title": "short title", "why": "one sentence on why it suits both"}]} with 3 ideas.')
+    ideas = [{"title": str(i.get("title", ""))[:80], "why": str(i.get("why", ""))[:240]}
+             for i in (out.get("ideas") or []) if isinstance(i, dict) and i.get("title")][:3]
+    if not ideas:
+        raise HTTPException(503, "AI suggestions are unavailable right now. Please try again.")
+    return {"ideas": ideas}
+
+
+class BioIn(BaseModel):
+    draft: str = Field(default="", max_length=500)
+
+
+@api.post("/ai/bio")
+async def ai_bio(body: BioIn, me: User = Depends(current_user)):
+    rate_limit_key("ai", me.id, 30, 3600)
+    p = profile_brief(public_profile(me))
+    out = await ai_call(
+        "You help people write honest, friendly dating-profile bios in the first person. Keep their voice and facts; "
+        "never invent jobs, hobbies or achievements. Don't open with their name or age (the profile already shows them). "
+        "Each bio under 300 characters.",
+        f"My profile: {json.dumps(p)}\nMy current draft: {body.draft or '(empty)'}\n"
+        'Return {"bios": ["...", "..."]} with 2 alternative bios.')
+    bios = [str(x).strip()[:500] for x in (out.get("bios") or []) if str(x).strip()][:2]
+    if not bios:
+        raise HTTPException(503, "AI suggestions are unavailable right now. Please try again.")
+    return {"bios": bios}
+
+
+@api.post("/admin/reports/{report_id}/ai-summary")
+async def ai_report_summary(report_id: str, admin: User = Depends(require_admin)):
+    rate_limit_key("ai-admin", admin.id, 60, 3600)
+    r = await db.reports.find_one({"_id": oid(report_id)})
+    if not r:
+        raise HTTPException(404, "Report not found")
+    target = User.from_mongo(await db.users.find_one({"_id": oid(r["reported_id"])}))
+    history = [{"reason": x["reason"], "details": x.get("details", "")[:300], "status": x["status"], "resolution": x.get("resolution")}
+               async for x in db.reports.find({"reported_id": r["reported_id"], "_id": {"$ne": r["_id"]}}).sort("created_at", -1).limit(10)]
+    out = await ai_call(
+        "You assist trust & safety moderators of a dating app. Summarise the report neutrally, flag safety risks, and suggest an "
+        "action. Chat messages are end-to-end encrypted and not available; base your view only on what is given. A human decides.",
+        f"Report: {json.dumps({'reason': r['reason'], 'details': r.get('details', '')})}\n"
+        f"Reported profile: {json.dumps(profile_brief(public_profile(target)) if target else None)}\n"
+        f"Account status: {target.status if target else 'deleted'}\nOther reports on this person: {json.dumps(history)}\n"
+        'Return {"summary": "2-3 sentences", "risk": "low|medium|high", "suggested_action": "dismiss|warn|suspend|ban", "why": "one sentence"}.')
+    risk = out.get("risk") if out.get("risk") in ("low", "medium", "high") else "medium"
+    act = out.get("suggested_action") if out.get("suggested_action") in ("dismiss", "warn", "suspend", "ban") else "warn"
+    return {"summary": str(out.get("summary", ""))[:800], "risk": risk, "suggested_action": act, "why": str(out.get("why", ""))[:300]}
+
+
+
 app.include_router(api)
-app.add_middleware(CORSMiddleware, allow_credentials=True, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
+app.add_middleware(CORSMiddleware, allow_credentials=False, allow_origins=[o.strip() for o in os.environ.get("CORS_ORIGINS", "*").split(",")],
+                   allow_methods=["*"], allow_headers=["*"])  # bearer tokens only, no cookies
 
 
 @app.on_event("shutdown")

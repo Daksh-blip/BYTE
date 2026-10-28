@@ -105,3 +105,16 @@
 - Main agent: Reset email pre-fill now uses an in-memory notice (src/auth-notice.ts) read with useFocusEffect in login.tsx. Global 401 handler is in src/api.ts and src/auth.tsx.
 - Signal Protocol: src/signal/* and backend /api/signal/*. Legacy chats are read-only until upgraded.
 - Self-tests passed: frontend/tests/signal_e2e.mjs (25/25), backend pytest api (11/11, register test skipped due to the email rate limit), signal_migration (3/3), passwords (13/13), pw_iter5 (11/11).
+
+## Session 3 — audit fixes, live delivery, encrypted photos, multi-device linking
+- Security audit: fixed account enumeration (signup returns the same response for existing accounts; dummy bcrypt on unknown-email login), photo route checks blocks, CORS without credentials and configurable via CORS_ORIGINS.
+- Live delivery: WebSocket /api/ws (token in the first frame; session re-checked on every frame). Events carry no content: message, typing, read, opened, sync. Receipts toggle in Settings is reciprocal.
+- Encrypted photos: XChaCha20 on the device → POST /api/matches/{id}/media (ciphertext only). The key travels inside the Signal message. View-once opens exactly once (atomic, 410 afterwards; the sender can't open it).
+- Multi-device: up to 3 devices, each with its own Signal identity (sigUserId "uid.hex"). Each message is encrypted per device (ciphertexts map, exact device set enforced). A new device is pending until a linked device approves it with a 6-digit code. History goes to the new device as a Signal-encrypted transfer via /api/signal/sync. "Takeover" (re-enter password) makes the current device the only one. Migration 2026-10-multidevice retires old single-device records.
+- Self-tests passed: frontend/tests/signal_e2e.mjs 30/30, pytest signal_migration 3/3 and passwords 13/13. api tests: the duplicate-register test was updated for the enumeration fix.
+
+## Session 4 — iteration_7 fixes, QR device linking, Google/Apple sign-in, Claude AI
+- Fixes: AuthGuard now sends auto-logged-out users to /auth/login (notice set before signOut; hasLoginNotice in auth-notice.ts). Settings signal status shows "Waiting for approval…" when the device is pending. Takeover also revokes PENDING devices + their sessions; DELETE device clears pending. Device list hides expired pending requests and shows "Requested <time>"; code input is full width. View-once photo key is dropped only on 410/403. sendTyping throttle per match.
+- QR linking: pending device shows a QR (payload bytetalks-link:v1:<deviceId>:<code>, testID device-link-qr) plus the 6-digit code. Linked device has "Scan code to link a device" (devices-scan-button) -> LinkScanner modal (expo-camera, permission pre-prompt / Open Settings). Manual code entry still works.
+- Google sign-in (Emergent): POST /api/auth/google {session_id}; buttons on Welcome and Login (google-sign-in-button). Web callback handled in AuthProvider mount. Apple: POST /api/auth/apple, native button iOS only.
+- Claude (claude-sonnet-5-5 via Emergent key): /api/ai/icebreakers/{match}, /api/ai/date-ideas/{match}, /api/ai/bio, /api/admin/reports/{id}/ai-summary. UI: chat-ai-button -> ai-ideas-sheet; edit-bio-ai-button -> ai-bio-sheet; admin sheet admin-ai-summary-button.

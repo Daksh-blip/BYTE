@@ -8,6 +8,7 @@ import Ionicons from "@react-native-vector-icons/ionicons";
 
 import { api, Me } from "@/src/api";
 import { useAuth } from "@/src/auth";
+import { AiBioHelper } from "@/src/components/ai-bio-helper";
 import { GENDERS, INTEREST_OPTIONS, INTENTIONS, LANGUAGES, PROMPT_QUESTIONS } from "@/src/constants";
 import { Sheet, SheetRow } from "@/src/components/sheet";
 import { PhotoGrid } from "@/src/components/photo-grid";
@@ -95,6 +96,7 @@ export default function EditProfile() {
         <Text style={s.section}>About you</Text>
         <Field testID="edit-name-input" label="First name" value={name} onChangeText={setName} maxLength={40} />
         <Field testID="edit-bio-input" label="Bio" value={bio} onChangeText={setBio} multiline maxLength={500} style={s.bio} placeholder="What makes you, you?" />
+        <AiBioHelper draft={bio} onPick={setBio} />
         <Field testID="edit-job-input" label="Job" value={job} onChangeText={setJob} placeholder="What do you do?" />
         <Field testID="edit-city-input" label="City" value={city} onChangeText={setCity} placeholder="Where are you based?" />
         <Field testID="edit-pronouns-input" label="Pronouns (optional)" value={pronouns} onChangeText={setPronouns} placeholder="e.g. she/her" maxLength={20} />

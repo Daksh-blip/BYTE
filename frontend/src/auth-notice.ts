@@ -8,6 +8,8 @@ export function setLoginNotice(n: Notice) {
   pending = n;
 }
 
+export const hasLoginNotice = () => pending !== null;
+
 export function takeLoginNotice(): Notice | null {
   const n = pending;
   pending = null;

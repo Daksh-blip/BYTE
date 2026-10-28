@@ -1,0 +1,48 @@
+{
+  "summary": "Frontend E2E test on web preview (390x844) using 2-3 real browser contexts (maya A, leo B, maya C), plus Mongo/API checks. PASS: live WebSocket delivery A->B and B->A in about 0.8s with no reload; typing indicator 'Maya is typing…'; '· Read' on the sender's last message; reciprocal receipts toggle (with leo OFF, neither side sees typing or Read while messages still arrive live; with it back ON, both work again); encrypted photo (decrypted image renders on both sides with the 'Encrypted photo' caption; the stored object has no image magic bytes; the record is in db.chat_media); view-once ('Tap to open' -> viewer -> 'Opened' on both sides and still after reload; API returns 410 for the recipient and 403 for the sender); device linking (third context shows device-pending-panel with a 6-digit code, chat-device-pending is shown and the composer is read-only; A approves -> C is active in about 2.5s; C's chat shows the pre-link messages from both maya and leo (history sync); leo's new message reaches both maya devices and C's message reaches leo and A); takeover; auth guard on signed-out deep links (/settings, /chat -> /welcome). BUGS: (1) REGRESSION: auto-logout after a remote password change now ends on /welcome instead of /auth/login with the red notice (AuthGuard race); (2) settings-signal-status says 'Active on this device' while the device is still pending; (3) takeover leaves other PENDING devices and their sessions alive; (4) stale pending devices look identical in the devices list, so you can't tell which one to approve. Password reset pre-fill was not re-tested.",
+  "backend_issues": {
+    "critical": [],
+    "minor": [
+      {"endpoint": "POST /api/signal/takeover", "issue": "Only revokes devices with active=True. Other pending devices (e.g. from an abandoned or attacker login) stay pending and their session_jti is not revoked, although the UI promises 'Your other devices are removed'. Seen in DB: maya device 6ae14f313c4587fda152a0a4 stayed pending after 3 takeovers. server.py:1379-1381"},
+      {"endpoint": "server.py:1243 comment", "issue": "Stale comment: says 'One active Signal device per account (deviceId 1)', but this is now multi-device."}
+    ]
+  },
+  "frontend_issues": {
+    "ui_bugs": [
+      {"component": "Settings > Encryption status (app/settings.tsx:211-212)", "issue": "The status text depends only on signalStatus==='ready'. A pending, unlinked device shows 'Active on this device. Keys never leave it.' even though device-pending-panel is shown and the chat composer is disabled. It should read something like 'Waiting for approval from your other device' when useLinkState()==='pending'.", "testID": "settings-signal-status", "priority": "MEDIUM"},
+      {"component": "Auto-logout redirect (app/_layout.tsx:35-42 AuthGuard + src/auth.tsx:83-95)", "issue": "REGRESSION from the new auth guard. After a password change in another session, the 401 handler navigates to /auth/login, but AuthGuard's effect then runs with stale segments ('(tabs)') and user=null, and replaces the route with /welcome. Observed navigation: /chats -> /auth/login -> /welcome. The red notice only appears if the user also taps 'I already have an account'.", "testID": "login-notice", "priority": "MEDIUM"}
+    ],
+    "integration_issues": [],
+    "design_issues": [
+      {"screen": "Settings > Secure chat devices (devices-sheet)", "issues": [
+        "Pending devices show only 'web · Waiting for approval', with no creation time or browser/OS. When stale pending entries exist (2 were listed during the test), the user can't tell which one matches the new device. Show the time created (e.g. 'Requested 2 min ago') and hide entries that have expired (link_expires).",
+        "The code input is only about 90px wide and its label 'Code shown on the new device' wraps onto 3 lines next to it, which looks cramped. Put the label on its own line and make the input full width."
+      ]},
+      {"screen": "Chat header on a freshly linked device", "issues": ["Right after linking, C's header showed 'Secure session not set up yet' even though history was readable and sending worked. Minor and possibly transient."]}
+    ],
+    "react_native_issues": []
+  },
+  "test_report_links": ["/app/backend/tests/test_bytetalks_media_live.py", "/app/test_reports/pytest/pytest_media_live.xml", "/app/backend/tests/ui_helpers.py"],
+  "action_items": [
+    "Fix the AuthGuard vs 401-handler race: in AuthGuard, redirect to /auth/login when a login notice is pending (add a peekLoginNotice() to auth-notice.ts), or skip the guard while the unauthorized handler is navigating.",
+    "settings.tsx:212: show the pending/unlinked state in settings-signal-status when linkState==='pending'.",
+    "POST /signal/takeover: also revoke pending devices (pending=True) belonging to the user and revoke their session_jti.",
+    "Devices sheet: show the created time for pending devices, filter out expired pending entries, and give the code input a full-width layout.",
+    "photo-bubble.tsx:40-42: any error while opening a view-once photo (including network errors) calls onViewOnceOpened(), which wipes the key locally. Only do that when the server returns 410 or 403.",
+    "Optional: live.ts sendTyping uses one global 2.5s throttle across all matches; make it per match."
+  ],
+  "critical_code_review_comments": [
+    "server.py is 1814 lines (it was 1565). Split it into routers: auth, signal/devices, media, matches, admin, ws.",
+    "chat/[matchId].tsx is 552 lines and close to the 700-line limit. Consider moving the photo send and live-event logic into hooks.",
+    "openEncryptedPhoto always labels the decrypted data URI as image/jpeg, even for PNG. Browsers sniff the type so it works, but it's better to store the MIME type inside the encrypted payload.",
+    "Revocation over the WebSocket is only checked on the next frame (25s ping), so a revoked session keeps receiving live events until then. Acceptable but worth noting.",
+    "Deprecated packages: none found (no expo-av, expo-barcode-scanner or expo-background-fetch)."
+  ],
+  "updated_files": ["/app/backend/tests/test_bytetalks_media_live.py"],
+  "success_rate": {"backend": "100% (8/8 media/receipts API+DB checks)", "frontend": "~90% (all 6 requested feature flows pass; 1 regression in the auto-logout redirect; status-text bug)"},
+  "seed_data_creation": "Added TEST_ messages, 2 normal and 2 view-once chat_media records to match 6ae148878ee7eecde617a089. Several maya/leo signal_devices records were created (takeovers and one linked device). leo's receipts were restored to ON. ethan's password was changed and reverted to ByteTalks123! (twice, verified 200).",
+  "retest_needed": true,
+  "should_main_agent_self_test": true,
+  "context_for_next_testing_agent": "settings-signal-status shows 'Active' even when pending, so ALWAYS open settings-devices-row and check device-pending-panel, then use takeover-password/takeover-submit. When approving from A, stale pending devices may also be listed. Record the device-code-* ids BEFORE the new context logs in and approve the new id. The photo-send sheet animates, so wait about 1.2s before tapping photo-send-normal/view-once (otherwise you get 'outside of viewport'). expo-image-picker on web: use page.expect_file_chooser() around the chat-photo-button tap. subprocess calls to ui_helpers.py work from inside browser scripts.",
+  "rca_of_issue": "Auto-logout regression: signOut() calls setUser(null). The 401 handler's .finally then calls router.replace('/auth/login'). AuthGuard's useEffect([user, first]) fires for the render with user=null while segments[0] is still '(tabs)', so it calls router.replace('/welcome') after the login navigation. Reproduce: log in as ethan, change the password via API (ui_helpers.py change_pw), tap tab-chats -> URL ends at /welcome. Status-text bug: settings.tsx renders text from useSignalStatus() only and ignores useLinkState()."
+}

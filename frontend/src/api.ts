@@ -140,6 +140,7 @@ export type Me = Profile & {
   status: "active" | "warned" | "suspended" | "banned";
   status_reason: string;
   suspended_until: string | null;
+  receipts?: boolean;
 };
 export type MatchT = {
   id: string;
@@ -161,6 +162,7 @@ export type MessageT = {
   recipient_public_key?: string;
   // signal-v1 routing (set by the server)
   sender_device?: string;
+  sender_sig?: string;
   recipient_device?: string;
   // system events
   kind?: string;

@@ -29,13 +29,16 @@ function caller(token, dev) {
   };
 }
 async function device(email) {
-  const s = await login(email); const dev = { id: null };
+  const s = await login(email); const dev = { id: null, status: null, code: null };
   const call = caller(s.token, dev);
-  const client = await createSignalProtocolClient({ identity: { userId: s.user.id }, adapters: { storage: inMemoryStore(), relay: makeRelay(call, "test", (id) => (dev.id = id)) }, logger: quiet });
-  return { uid: s.user.id, call, client, dev, token: s.token };
+  const sig = `${s.user.id}.${[...crypto.getRandomValues(new Uint8Array(8))].map((b) => b.toString(16).padStart(2, "0")).join("")}`;
+  const client = await createSignalProtocolClient({ identity: { userId: sig }, adapters: { storage: inMemoryStore(), relay: makeRelay(call, "test", sig, (id, st, code) => Object.assign(dev, { id, status: st, code })) }, logger: quiet });
+  return { uid: s.user.id, sig, call, client, dev, token: s.token };
 }
 
 
+// Isolation: retire earlier test devices of the test accounts (not deleted).
+q(`ids=[str(u["_id"]) for u in db.users.find({"email":{"$in":["lena@bytetalks.app","omar@bytetalks.app","sofia@bytetalks.app"]}})]\ndb.signal_devices.update_many({"user_id":{"$in":ids},"active":True},{"$set":{"active":False,"pending":False,"revoked_reason":"test-reset"}})\ndb.signal_devices.update_many({"user_id":{"$in":ids},"pending":True},{"$set":{"pending":False}})\nprint(1)`);
 const A = await device("lena@bytetalks.app");
 const Bo = await device("omar@bytetalks.app");
 ok(A.dev.id && Bo.dev.id, "both devices enrolled via provisionIdentityKey");
@@ -47,14 +50,14 @@ const before = dev();
 ok(before.ec.length > 0 && before.kem.length > 0 && before.spk && before.lr, "prekeys uploaded (EC + KEM one-time, signed, last-resort)");
 ok(!JSON.stringify(before).match(/private|secret/i), "server device record holds no private keys");
 
-const bob = ProtocolAddress.create(Bo.uid, 1), alice = ProtocolAddress.create(A.uid, 1);
-const b1 = await A.call("POST", `/signal/bundle/${Bo.uid}`);
+const bob = ProtocolAddress.create(Bo.sig, 1), alice = ProtocolAddress.create(A.sig, 1);
+const b1 = await A.call("POST", `/signal/bundle/${Bo.uid}?device=${Bo.dev.id}`);
 const after = dev();
 ok(after.ec.length === before.ec.length - 1 && after.kem.length === before.kem.length - 1, "bundle fetch atomically consumed one EC + one KEM one-time prekey");
 await A.client.establishSession(bob, b1.bundle);
 const secret = "meet at 7, the blue cafe 🔐";
 const ct = await A.client.encryptMessage(bob, secret);
-const sent = await A.call("POST", `/matches/${mid}/messages`, { protocol: "signal-v1", ciphertext: ct, recipient_device: b1.device });
+const sent = await A.call("POST", `/matches/${mid}/messages`, { protocol: "signal-v1", ciphertexts: { [b1.device]: ct } });
 const stored = q(`print(json_util.dumps(db.messages.find_one({"_id":ObjectId("${sent.id}")})))`);
 ok(stored.protocol === "signal-v1" && !JSON.stringify(stored).includes("blue cafe"), "DB stores Signal ciphertext only, no plaintext");
 const got = await Bo.call("GET", `/matches/${mid}/messages`);
@@ -79,30 +82,42 @@ let ei = 0; try { await E.call("GET", `/signal/identity/${Bo.uid}`); } catch (e)
 
 let leg = 0; try { await A.call("POST", `/matches/${mid}/messages`, { ciphertext: "x".repeat(40), nonce: "n".repeat(32), sender_public_key: "a", recipient_public_key: "b" }); } catch (e) { leg = e.status; }
 ok(leg === 422, "legacy-format send rejected (no downgrade)");
-let wd = 0; try { await A.call("POST", `/matches/${mid}/messages`, { protocol: "signal-v1", ciphertext: ct, recipient_device: A.dev.id }); } catch (e) { wd = e.message; }
-ok(wd === "RECIPIENT_DEVICE_CHANGED", "send to a non-active recipient device rejected");
+let wd = 0; try { await A.call("POST", `/matches/${mid}/messages`, { protocol: "signal-v1", ciphertexts: { [A.dev.id]: ct } }); } catch (e) { wd = e.message; }
+ok(wd === "DEVICE_SET_CHANGED", "send to the wrong device set rejected");
 
-// Bob reinstalls: new identity replaces the old device; Alice must explicitly accept before sending.
-const oldBobDev = Bo.dev.id;
+// Multi-device: a second device for Bob stays pending until his linked device approves it with the code.
+await A.client.encryptMessage(bob, "warmup");
 const Bo2 = await device("omar@bytetalks.app");
-ok(Bo2.dev.id !== oldBobDev, "new install enrolls a new device");
-const st = await Bo.call("GET", `/signal/device-status?device=${oldBobDev}`);
-ok(st.active === false, "old device marked replaced (stops receiving)");
-let ret = 0; try { await Bo.call("POST", "/signal/prekeys", { keys: [] }); } catch (e) { ret = e.message; } ok(ret === "DEVICE_REVOKED", "replaced device cannot publish prekeys");
-await A.client.deleteSession(bob);
-const b2 = await A.call("POST", `/signal/bundle/${Bo.uid}`);
-let untrusted = null; try { await A.client.establishSession(bob, b2.bundle); } catch (e) { if (isUntrustedIdentityError(e)) untrusted = e; }
-ok(!!untrusted, "identity change fails closed (UntrustedIdentityError)");
-await A.client.acceptIdentityRotation(Bo.uid, untrusted.identity);
-await A.client.establishSession(bob, (await A.call("POST", `/signal/bundle/${Bo.uid}`)).bundle);
-ok((await Bo2.client.decryptMessage(alice, await A.client.encryptMessage(bob, "new phone?"))) === "new phone?", "after explicit acceptance, new device decrypts");
-
+ok(Bo2.dev.status === "pending" && /^\d{6}$/.test(Bo2.dev.code), "second device enrolls as pending with a link code");
+let pend = 0; try { await Bo2.call("POST", `/signal/devices/${Bo2.dev.id}/approve`, { code: Bo2.dev.code }); } catch (e) { pend = e.status; } ok(pend === 403, "pending device cannot approve itself");
+let wc = 0; try { await Bo.call("POST", `/signal/devices/${Bo2.dev.id}/approve`, { code: Bo2.dev.code === "000000" ? "111111" : "000000" }); } catch (e) { wc = e.status; } ok(wc === 400, "wrong link code rejected");
+let pdm = 0; try { await Bo2.call("POST", `/matches/${mid}/messages`, { protocol: "signal-v1", ciphertexts: { [A.dev.id]: "eA==" } }); } catch (e) { pdm = e.message; } ok(pdm === "DEVICE_NOT_ACTIVE", "pending device cannot send");
+await Bo.call("POST", `/signal/devices/${Bo2.dev.id}/approve`, { code: Bo2.dev.code });
+const ids = await A.call("GET", `/signal/identity/${Bo.uid}`);
+ok(ids.devices.length === 2, "after approval the peer has 2 active devices");
+let one = 0; try { await A.call("POST", `/matches/${mid}/messages`, { protocol: "signal-v1", ciphertexts: { [b1.device]: await A.client.encryptMessage(bob, "x") } }); } catch (e) { one = e.message; }
+ok(one === "DEVICE_SET_CHANGED", "sender must encrypt for every linked device");
+const bob2 = ProtocolAddress.create(Bo2.sig, 1);
+await A.client.establishSession(bob2, (await A.call("POST", `/signal/bundle/${Bo.uid}?device=${Bo2.dev.id}`)).bundle);
+const fan = { [b1.device]: await A.client.encryptMessage(bob, "to both"), [Bo2.dev.id]: await A.client.encryptMessage(bob2, "to both") };
+const sent2 = await A.call("POST", `/matches/${mid}/messages`, { protocol: "signal-v1", ciphertexts: fan });
+const g1 = (await Bo.call("GET", `/matches/${mid}/messages`)).find((m) => m.id === sent2.id);
+const g2 = (await Bo2.call("GET", `/matches/${mid}/messages`)).find((m) => m.id === sent2.id);
+ok(g1.ciphertext !== g2.ciphertext, "each device receives only its own ciphertext");
+ok((await Bo.client.decryptMessage(ProtocolAddress.create(g1.sender_sig, 1), g1.ciphertext)) === "to both" && (await Bo2.client.decryptMessage(ProtocolAddress.create(g2.sender_sig, 1), g2.ciphertext)) === "to both", "both linked devices decrypt");
+// History transfer: Bob's first device sends its history to the new device over Signal.
+await Bo.client.establishSession(ProtocolAddress.create(Bo2.sig, 1), (await Bo.call("POST", `/signal/bundle/${Bo.uid}?device=${Bo2.dev.id}`)).bundle);
+const hist = JSON.stringify({ t: "sync", match: mid, entries: { x1: "old history line" } });
+await Bo.call("POST", "/signal/sync", { device: Bo2.dev.id, ciphertext: await Bo.client.encryptMessage(ProtocolAddress.create(Bo2.sig, 1), hist) });
+const dbSync = q(`print(json_util.dumps(list(db.signal_sync.find({"to":"${Bo2.dev.id}"}))))`);
+ok(dbSync.length === 1 && !JSON.stringify(dbSync).includes("old history"), "history transfer stored as ciphertext only");
+const items = await Bo2.call("GET", "/signal/sync");
+ok(JSON.parse(await Bo2.client.decryptMessage(ProtocolAddress.create(items[0].from_sig, 1), items[0].ciphertext)).entries.x1 === "old history line", "new device decrypts transferred history");
+ok((await E.call("GET", "/signal/sync")).length === 0, "other users never receive someone else's sync transfers");
 // Device revocation ends that device's login session too.
-const devs = await Bo2.call("GET", "/signal/devices");
-ok(devs.some((d) => d.current) && devs.some((d) => !d.active), "device list shows current and replaced devices");
-await Bo2.call("DELETE", `/signal/devices/${oldBobDev}`);
-let rs = 0; try { await Bo.call("GET", "/me"); } catch (e) { rs = e.status; } ok(rs === 401, "revoked device's session is signed out");
-let self = 0; try { await Bo2.call("DELETE", `/signal/devices/${Bo2.dev.id}`); } catch (e) { self = e.status; } ok(self === 400, "current device can't revoke itself");
+await Bo2.call("DELETE", `/signal/devices/${Bo.dev.id}`);
+let rs = 0; try { await Bo.call("GET", "/me"); } catch (e) { rs = e.status; } ok(rs === 401, "removed device's session is signed out");
+let self = 0; try { await Bo2.call("DELETE", `/signal/devices/${Bo2.dev.id}`); } catch (e) { self = e.status; } ok(self === 400, "current device can't remove itself");
 
 q(`db.messages.delete_many({"match_id":"${mid}"})\ndb.matches.delete_one({"_id":ObjectId("${mid}")})\nprint(1)`);
 console.log(`\n${pass} passed, ${fail} failed`);

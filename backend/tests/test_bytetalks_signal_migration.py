@@ -34,7 +34,7 @@ def test_legacy_preserved_and_upgrade_one_way():
         msgs = b.get(f"{BASE}/matches/{mid}/messages").json()
         assert msgs[0]["protocol"] == "nacl-box-v1" and msgs[0]["nonce"] == legacy["nonce"] and msgs[0]["ciphertext"] == legacy["ciphertext"]
         # A Signal send into a not-yet-upgraded chat is refused (upgrade must be explicit)
-        r = a.post(f"{BASE}/matches/{mid}/messages", json={"protocol": "signal-v1", "ciphertext": "eA==", "recipient_device": "x"})
+        r = a.post(f"{BASE}/matches/{mid}/messages", json={"protocol": "signal-v1", "ciphertexts": {"x": "eA=="}})
         assert r.status_code == 409 and r.json()["detail"] == "UPGRADE_REQUIRED"
         # Non-participant cannot upgrade
         c, _ = session("zara@bytetalks.app")

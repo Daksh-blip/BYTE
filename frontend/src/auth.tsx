@@ -1,12 +1,14 @@
 import React, { createContext, useCallback, useContext, useEffect, useState } from "react";
-import { AppState } from "react-native";
-import { router } from "expo-router";
+import { AppState, Platform } from "react-native";
+import * as Linking from "expo-linking";
 
 import { api, ApiError, Me, setApiToken, setMediaToken, setUnauthorizedHandler } from "@/src/api";
 import { setLoginNotice } from "@/src/auth-notice";
+import { cleanWebUrl, exchangeGoogle, sessionIdFrom } from "@/src/social-auth";
 import { clearKeyCache, loadLegacyKeys } from "@/src/e2ee";
 import { clearCacheKeys } from "@/src/signal/cache";
 import { startSignal, stopSignal } from "@/src/signal";
+import { startLive, stopLive } from "@/src/live";
 import { storage } from "@/src/utils/storage";
 
 async function refreshMediaToken() {
@@ -30,6 +32,7 @@ const Ctx = createContext<AuthState | null>(null);
 async function ensureKeys(user: Me) {
   await loadLegacyKeys(user.id); // read-only, for old chats
   startSignal(user.id); // enrolls this device for Signal in the background
+  startLive();
 }
 
 export function AuthProvider({ children }: { children: React.ReactNode }) {
@@ -38,6 +41,19 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
 
   useEffect(() => {
     (async () => {
+      // A Google sign-in redirect (web, or a cold-started app) carries a one-time session_id: handle it first.
+      const url = Platform.OS === "web" ? window.location.href : await Linking.getInitialURL();
+      const sid = sessionIdFrom(url);
+      if (sid) {
+        try {
+          const r = await exchangeGoogle(sid);
+          if (r) await storage.secureSet(TOKEN_KEY, r.token);
+        } catch (e: any) {
+          setLoginNotice({ message: e?.message || "Google sign-in didn't finish. Please try again.", tone: "error" });
+        } finally {
+          cleanWebUrl(); // the one-time id is useless after one attempt
+        }
+      }
       const t = await storage.secureGet(TOKEN_KEY, null as string | null);
       if (t) {
         setApiToken(t);
@@ -66,6 +82,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   }, []);
 
   const signOut = useCallback(async () => {
+    stopLive();
     await stopSignal();
     await storage.secureRemove(TOKEN_KEY);
     setApiToken(null);
@@ -81,13 +98,9 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       if (handling) return;
       handling = true;
       setApiToken(null); // stop any further requests with the revoked token right away
+      // Set the notice first: the root AuthGuard sees it and sends the user to login (not Welcome).
+      setLoginNotice({ message: "You were signed out because your password was changed. Please sign in again.", tone: "error" });
       signOut().finally(() => {
-        setLoginNotice({ message: "You were signed out because your password was changed. Please sign in again.", tone: "error" });
-        try {
-          router.replace("/auth/login");
-        } catch {
-          // navigator not ready; index route redirects signed-out users
-        }
         handling = false;
       });
     });

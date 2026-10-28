@@ -8,6 +8,7 @@ import dayjs from "dayjs";
 
 import { api, photoSource } from "@/src/api";
 import { useAuth } from "@/src/auth";
+import { AiReportSummary } from "@/src/components/ai-report-summary";
 import { Sheet } from "@/src/components/sheet";
 import { Button, Chip, EmptyState } from "@/src/components/ui";
 import { useToast } from "@/src/components/toast";
@@ -165,6 +166,7 @@ export default function Admin() {
 
       <Sheet visible={!!active} onClose={() => setActive(null)} title={active && isReport(active) ? "Resolve report" : "Decide appeal"} testID="admin-action-sheet">
         {active && !isReport(active) ? <Text style={s.body}>&ldquo;{active.message}&rdquo;</Text> : null}
+        {active && isReport(active) ? <AiReportSummary reportId={active.id} onSuggest={setAction} /> : null}
         <View style={s.chips}>
           {(active && isReport(active) ? ACTIONS : ([{ value: "approve", label: "Lift restriction" }, { value: "deny", label: "Keep restriction" }] as const)).map((a) => (
             <Chip key={a.value} testID={`admin-action-${a.value}`} label={a.label} selected={action === a.value} onPress={() => setAction(a.value)} />
