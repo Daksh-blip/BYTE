@@ -30,7 +30,7 @@ function Subscriptions({ children }: { children: React.ReactNode }) {
   return <SubscriptionProvider userId={user?.id ?? null}>{children}</SubscriptionProvider>;
 }
 
-const PUBLIC_ROUTES = new Set(["", "index", "welcome", "auth", "+html"]);
+const PUBLIC_ROUTES = new Set(["", "index", "welcome", "auth", "legal", "+html"]);
 
 // Signed-out users opening any protected deep link go to Welcome; after an auto-logout (login notice pending) they go to login.
 function AuthGuard() {

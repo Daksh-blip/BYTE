@@ -126,6 +126,7 @@ export type Profile = {
   compatibility?: { score: number; reasons: string[]; shared_interests: string[] };
   superlike?: boolean;
   note?: string;
+  liked?: { kind: "photo"; photo_url: string } | { kind: "prompt"; question: string; answer: string } | null;
 };
 export type Me = Profile & {
   email: string;

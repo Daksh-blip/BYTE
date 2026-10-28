@@ -1,5 +1,5 @@
 import React, { useState } from "react";
-import { ActivityIndicator, Linking, Platform, Pressable, Text, View } from "react-native";
+import { ActivityIndicator, Pressable, Text, View } from "react-native";
 import { Image } from "expo-image";
 import * as ImagePicker from "expo-image-picker";
 import Ionicons from "@react-native-vector-icons/ionicons";
@@ -13,14 +13,13 @@ import { makeStyles, useTheme, spacing, radius, font } from "@/src/theme";
 
 const SLOTS = 6;
 
-/** Profile photo manager: add (with permission handling), remove, set main photo. */
+/** Profile photo manager: add (system photo picker, no library permission), remove, set main photo. */
 export function PhotoGrid() {
   const s = useStyles();
   const { colors } = useTheme();
   const { user, setUser } = useAuth();
   const toast = useToast();
   const [uploading, setUploading] = useState(false);
-  const [perm, setPerm] = useState<"explain" | "blocked" | null>(null);
   const [selected, setSelected] = useState<string | null>(null);
   const photos = user?.photos ?? [];
 
@@ -40,21 +39,8 @@ export function PhotoGrid() {
     }
   };
 
-  const onAdd = async () => {
-    if (Platform.OS === "web") return pick();
-    const current = await ImagePicker.getMediaLibraryPermissionsAsync();
-    if (current.granted) return pick();
-    if (!current.canAskAgain) return setPerm("blocked");
-    setPerm("explain");
-  };
-
-  const requestAndPick = async () => {
-    const r = await ImagePicker.requestMediaLibraryPermissionsAsync();
-    if (r.granted) {
-      setPerm(null);
-      pick();
-    } else setPerm("blocked");
-  };
+  // The system photo picker needs no photo-library permission: only the photo the user picks is shared.
+  const onAdd = pick;
 
   const act = async (fn: () => Promise<Me>) => {
     try {
@@ -100,25 +86,6 @@ export function PhotoGrid() {
           );
         })}
       </View>
-
-      <Sheet visible={perm === "explain"} onClose={() => setPerm(null)} title="Add your best photos" testID="photo-permission-sheet">
-        <Text style={s.body}>BYTE TALKS needs access to your photos so you can pick pictures for your profile. We only upload the ones you choose.</Text>
-        <Button testID="photo-permission-continue" title="Continue" onPress={requestAndPick} />
-        <Button testID="photo-permission-later" title="Not now" variant="ghost" onPress={() => setPerm(null)} />
-      </Sheet>
-
-      <Sheet visible={perm === "blocked"} onClose={() => setPerm(null)} title="Photo access is off" testID="photo-blocked-sheet">
-        <Text style={s.body}>To add profile photos, allow photo access for BYTE TALKS in your device settings.</Text>
-        <Button
-          testID="photo-open-settings"
-          title="Open Settings"
-          onPress={() => {
-            setPerm(null);
-            Linking.openSettings();
-          }}
-        />
-        <Button testID="photo-blocked-close" title="Not now" variant="ghost" onPress={() => setPerm(null)} />
-      </Sheet>
 
       <Sheet visible={!!selected} onClose={() => setSelected(null)} title="Photo" testID="photo-actions-sheet">
         {selected && photos[0]?.id !== selected ? (

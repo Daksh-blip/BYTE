@@ -1,5 +1,6 @@
 import asyncio
 import json
+from contextvars import ContextVar
 import os
 import re
 import uuid
@@ -48,6 +49,23 @@ JWT_DAYS = 30
 APP_NAME = "byte-talks"
 
 app = FastAPI()
+
+# Demo profiles: shown in the preview, hidden in the live app. DEMO_PROFILES=on|off overrides; "auto" decides by host.
+_req_host: ContextVar[str] = ContextVar("req_host", default="")
+
+
+@app.middleware("http")
+async def remember_host(request: Request, call_next):
+    _req_host.set(request.headers.get("x-forwarded-host") or request.headers.get("host") or "")
+    return await call_next(request)
+
+
+def demo_on() -> bool:
+    mode = os.environ.get("DEMO_PROFILES", "auto").lower()
+    if mode in ("on", "off"):
+        return mode == "on"
+    h = _req_host.get().lower()
+    return "preview." in h or h.startswith(("localhost", "127.0.0.1", "0.0.0.0"))
 
 
 @app.get("/health", include_in_schema=False)
@@ -578,6 +596,9 @@ class SwipeIn(BaseModel):
     target_id: str
     action: str
     note: str = Field(default="", max_length=140)
+    # Optional: what was liked — a photo (its id) or a prompt answer (its index).
+    liked_kind: Optional[Literal["photo", "prompt"]] = None
+    liked_ref: str = Field(default="", max_length=64)
 
 
 class MessageIn(BaseModel):
@@ -888,7 +909,7 @@ async def update_me(body: ProfileIn, me: User = Depends(current_user)):
         if not (merged.name and merged.dob and merged.gender and merged.interested_in and merged.photos):
             raise HTTPException(400, "Complete your name, birthday, gender, preferences and add a photo first")
     await db.users.update_one({"_id": ObjectId(me.id)}, {"$set": upd})
-    if upd.get("onboarded") and not me.onboarded:
+    if upd.get("onboarded") and not me.onboarded and demo_on():
         await seed_likes_for(merged)
     return private_profile(merged)
 
@@ -996,6 +1017,8 @@ async def discover(mode: str = Query(default="smart"), me: User = Depends(curren
     q = {"onboarded": True, "paused": False, "status": {"$nin": ["banned", "suspended"]}, "role": {"$ne": "admin"}, "_id": {"$nin": [ObjectId(x) for x in exclude if ObjectId.is_valid(x)]}}
     if me.interested_in:
         q["gender"] = {"$in": me.interested_in}
+    if not demo_on():
+        q["is_seed"] = {"$ne": True}
     if mode == "new":
         q["created_at"] = {"$gte": now() - timedelta(days=14)}
     out = []
@@ -1066,9 +1089,21 @@ async def swipe(body: SwipeIn, me: User = Depends(current_user)):
         raise HTTPException(404, "Profile not found")
     if target.id in await blocked_ids(me.id):
         raise HTTPException(404, "Profile not found")
+    liked = None
+    if body.liked_kind and body.action != "pass":
+        if body.liked_kind == "photo":
+            if not any(p.id == body.liked_ref for p in target.photos):
+                raise HTTPException(400, "That photo is no longer on their profile")
+            liked = {"kind": "photo", "photo_id": body.liked_ref}
+        else:
+            i = int(body.liked_ref) if body.liked_ref.isdigit() else -1
+            if not 0 <= i < len(target.prompts or []):
+                raise HTTPException(400, "That prompt is no longer on their profile")
+            pr = target.prompts[i]
+            liked = {"kind": "prompt", "question": pr.get("question", ""), "answer": pr.get("answer", "")}
     await db.swipes.update_one({"from_id": me.id, "to_id": target.id},
                                {"$set": {"action": body.action, "note": body.note.strip() if body.action != "pass" else "",
-                                         "created_at": now()}}, upsert=True)
+                                         "liked": liked, "created_at": now()}}, upsert=True)
     match_id = None
     if body.action != "pass":
         if target.is_seed and random.random() < 0.6:
@@ -1087,10 +1122,15 @@ async def likes(me: User = Depends(current_user)):
         if s["from_id"] in mine or s["from_id"] in blocked:
             continue
         u = User.from_mongo(await db.users.find_one({"_id": oid(s["from_id"]), "paused": False, "status": {"$nin": ["banned", "suspended"]}}))
-        if u:
+        if u and (demo_on() or not u.is_seed):
             p = public_profile(u)
             p["superlike"] = s["action"] == "superlike"
             p["note"] = s.get("note", "")
+            lk = s.get("liked")
+            if lk and lk["kind"] == "photo":
+                ph = next((x for x in me.photos if x.id == lk.get("photo_id")), None)
+                lk = {"kind": "photo", "photo_url": photo_url(ph)} if ph else None
+            p["liked"] = lk
             p["compatibility"] = compatibility(me, u)
             out.append(p)
     return out

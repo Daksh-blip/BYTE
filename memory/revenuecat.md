@@ -8,9 +8,8 @@ This file is a memory for interacting with the user's RevenueCat account via the
 - entitlement_lookup_key: pro
 - offering_lookup_key: default
 - Packages (package -> product_id, current price):
-  - $rc_monthly -> prod9610987a67   ($14.99 / P1M, trial: none)
-  - $rc_three_month -> prod930598d616 ($34.99 / P3M, trial: none)
-  - $rc_annual  -> prodf69f9309a4   ($89.99 / P1Y, trial: none)
+  - $rc_monthly -> prod9610987a67   (₹199 INR / P1M, trial: none)
+  - $rc_annual  -> prodf69f9309a4   (₹1700 INR / P1Y, trial: none)
 - Dashboard: https://app.revenuecat.com/projects/proj7398e2db
 
 ## Check project_state via status API; if less than project_created, re-fetch RevenueCat playbook via integration expert.
@@ -33,3 +32,4 @@ Status: curl -sS -H "$AUTH" "$INTEGRATION_PROXY_URL/internal/revenuecat/projects
 3. Create matching subscription products with the SAME product IDs as in RevenueCat.
 4. Release build → TestFlight / Play internal testing → submit for review.
 All steps are in the FAQ section of the payments panel.
+- 2026-10-28: prices set to INR ₹199/month, ₹1700/year; $rc_three_month removed.

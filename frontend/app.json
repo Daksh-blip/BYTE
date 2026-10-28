@@ -22,7 +22,15 @@
         "foregroundImage": "./assets/images/adaptive-icon.png",
         "backgroundColor": "#0A0607"
       },
-      "package": "com.emergent.meetbypersonality.n45jnb"
+      "package": "com.emergent.meetbypersonality.n45jnb",
+      "blockedPermissions": [
+        "android.permission.READ_MEDIA_IMAGES",
+        "android.permission.READ_MEDIA_VIDEO",
+        "android.permission.READ_MEDIA_VISUAL_USER_SELECTED",
+        "android.permission.READ_EXTERNAL_STORAGE",
+        "android.permission.WRITE_EXTERNAL_STORAGE",
+        "android.permission.RECORD_AUDIO"
+      ]
     },
     "web": {
       "bundler": "metro",
@@ -49,7 +57,8 @@
         "expo-image-picker",
         {
           "photosPermission": "Add photos to your dating profile",
-          "cameraPermission": "Take a new photo for your profile"
+          "cameraPermission": "Take a new photo for your profile",
+          "microphonePermission": false
         }
       ],
       "@react-native-vector-icons/ionicons",

@@ -7,6 +7,7 @@ import { useSafeAreaInsets } from "react-native-safe-area-context";
 import Ionicons from "@react-native-vector-icons/ionicons";
 
 import { SocialButtons } from "@/src/components/social-buttons";
+import { COPYRIGHT } from "@/src/legal";
 import { Button } from "@/src/components/ui";
 import { makeStyles, useTheme, spacing, font, radius } from "@/src/theme";
 
@@ -48,9 +49,19 @@ export default function Welcome() {
           <SocialButtons />
           <Button testID="welcome-create-account" title="Create account with email" onPress={() => router.push("/auth/signup")} />
           <Button testID="welcome-sign-in" title="I already have an account" variant="secondary" onPress={() => router.push("/auth/login")} />
-          <Text style={s.legal}>By continuing you confirm you are 18+ and agree to our Terms and Privacy Policy.</Text>
+          <Text style={s.legal}>
+            By continuing you confirm you are 18+ and agree to our{" "}
+            <Text testID="welcome-terms-link" style={s.legalLink} onPress={() => router.push("/legal/terms")}>
+              Terms
+            </Text>{" "}
+            and{" "}
+            <Text testID="welcome-privacy-link" style={s.legalLink} onPress={() => router.push("/legal/privacy")}>
+              Privacy Policy
+            </Text>
+            .
+          </Text>
           <Text testID="welcome-founder" style={s.founder}>
-            Created by Daksh Mishra · Founder
+            Created by Daksh Mishra · Founder · {COPYRIGHT}
           </Text>
         </Animated.View>
       </View>
@@ -72,5 +83,6 @@ const useStyles = makeStyles((c) => ({
   pointText: { color: c.onSurfaceSecondary, fontSize: font.base, fontWeight: "500" },
   actions: { gap: spacing.md },
   legal: { color: c.muted, fontSize: font.sm, textAlign: "center", lineHeight: 18 },
+  legalLink: { color: c.brandPrimary, fontWeight: "700", textDecorationLine: "underline" },
   founder: { color: c.onSurfaceSecondary, fontSize: font.sm, textAlign: "center", fontWeight: "600", letterSpacing: 0.5 },
 }));

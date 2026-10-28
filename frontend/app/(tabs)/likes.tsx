@@ -118,6 +118,11 @@ export default function Likes() {
                   {locked ? "Someone" : item.name}
                   {!locked && item.age ? `, ${item.age}` : ""}
                 </Text>
+                {locked ? null : item.liked ? (
+                  <Text testID={`like-target-${item.id}`} style={s.liked} numberOfLines={1}>
+                    {item.liked.kind === "photo" ? "♥ Liked your photo" : `♥ Liked “${item.liked.question}”`}
+                  </Text>
+                ) : null}
                 {locked ? null : item.note ? (
                   <Text testID={`like-note-${item.id}`} style={s.note} numberOfLines={2}>
                     “{item.note}”
@@ -154,6 +159,7 @@ const useStyles = makeStyles((c) => ({
   demoBadge: { position: "absolute", top: spacing.sm, right: spacing.sm, backgroundColor: c.overlay, borderRadius: radius.pill, paddingHorizontal: spacing.sm, paddingVertical: 2 },
   demoText: { color: c.warning, fontSize: 11, fontWeight: "700" },
   note: { color: c.onSurfaceSecondary, fontSize: font.sm, marginTop: 2 },
+  liked: { color: c.brandPrimary, fontSize: font.sm, fontWeight: "700", marginTop: 2 },
   blur: { position: "absolute", top: 0, left: 0, right: 0, bottom: 0, alignItems: "center", justifyContent: "center" },
   gate: { backgroundColor: c.surfaceSecondary, borderRadius: radius.md, padding: spacing.lg, gap: spacing.sm, marginBottom: spacing.lg, borderWidth: 1, borderColor: c.brandSecondary },
   gateTitle: { color: c.onSurface, fontSize: font.xl, fontWeight: "800" },

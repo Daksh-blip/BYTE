@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { ActivityIndicator, Platform, Pressable, ScrollView, Switch, Text, View } from "react-native";
+import { ActivityIndicator, Linking, Platform, Pressable, ScrollView, Switch, Text, View } from "react-native";
 import dayjs from "dayjs";
 import { File, Paths } from "expo-file-system";
 import * as Sharing from "expo-sharing";
@@ -14,6 +14,7 @@ import { approveDevice, linkCode, myDevice, takeoverDevices, unavailableText, us
 type DeviceT = { id: string; platform: string; active: boolean; pending?: boolean; created_at: string; revoked_at: string | null; revoked_reason: string | null; current: boolean };
 import QRCode from "react-native-qrcode-svg";
 import { LinkScanner, linkPayload } from "@/src/components/link-scanner";
+import { COPYRIGHT, SUPPORT_EMAIL } from "@/src/legal";
 import { ScreenHeader } from "@/src/components/screen-header";
 import { Sheet } from "@/src/components/sheet";
 import { Button, Field } from "@/src/components/ui";
@@ -259,9 +260,30 @@ export default function Settings() {
         <Button testID="settings-logout-button" title="Sign out" variant="secondary" icon="log-out-outline" onPress={logout} style={{ marginTop: spacing.lg }} />
         <Button testID="settings-delete-button" title="Delete account" variant="ghost" onPress={() => setConfirmDelete(true)} />
 
+        <View style={s.group} testID="settings-legal">
+          <Pressable testID="settings-privacy-row" style={s.row} onPress={() => router.push("/legal/privacy")}>
+            <Text style={[s.label, { flex: 1 }]}>Privacy Policy</Text>
+            <Ionicons name="shield-checkmark-outline" size={20} color={colors.muted} />
+          </Pressable>
+          <Pressable testID="settings-terms-row" style={[s.row, s.top]} onPress={() => router.push("/legal/terms")}>
+            <Text style={[s.label, { flex: 1 }]}>Terms of Service</Text>
+            <Ionicons name="document-text-outline" size={20} color={colors.muted} />
+          </Pressable>
+          <Pressable testID="settings-support-row" style={[s.row, s.top]} onPress={() => Linking.openURL(`mailto:${SUPPORT_EMAIL}`)}>
+            <View style={{ flex: 1 }}>
+              <Text style={s.label}>Contact support</Text>
+              <Text style={s.sub}>{SUPPORT_EMAIL}</Text>
+            </View>
+            <Ionicons name="mail-outline" size={20} color={colors.muted} />
+          </Pressable>
+        </View>
+
         <View testID="settings-about" style={s.about}>
           <Text style={s.aboutBrand}>BYTE TALKS</Text>
           <Text style={s.sub}>Created by Daksh Mishra, Founder</Text>
+          <Text testID="settings-copyright" style={s.sub}>
+            {COPYRIGHT}
+          </Text>
         </View>
       </ScrollView>
 

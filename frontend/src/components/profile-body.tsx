@@ -1,5 +1,5 @@
 import React from "react";
-import { Text, View } from "react-native";
+import { Pressable, Text, View } from "react-native";
 import Ionicons from "@react-native-vector-icons/ionicons";
 
 import { Profile } from "@/src/api";
@@ -7,8 +7,8 @@ import { intentionLabel } from "@/src/constants";
 import { Chip } from "@/src/components/ui";
 import { makeStyles, useTheme, spacing, radius, font } from "@/src/theme";
 
-/** Bio, details, prompts, interests and compatibility for a profile. */
-export function ProfileBody({ p }: { p: Profile }) {
+/** Bio, details, prompts, interests and compatibility for a profile. Pass onLikePrompt to show a like button on each prompt. */
+export function ProfileBody({ p, onLikePrompt }: { p: Profile; onLikePrompt?: (index: number) => void }) {
   const s = useStyles();
   const { colors } = useTheme();
   const intention = intentionLabel(p.intention);
@@ -57,10 +57,15 @@ export function ProfileBody({ p }: { p: Profile }) {
           <Text style={s.bio}>{p.bio}</Text>
         </View>
       ) : null}
-      {p.prompts?.map((pr) => (
+      {p.prompts?.map((pr, i) => (
         <View key={pr.question} style={s.card} testID="profile-prompt">
           <Text style={s.cardLabel}>{pr.question}</Text>
           <Text style={s.answer}>{pr.answer}</Text>
+          {onLikePrompt ? (
+            <Pressable testID={`like-prompt-${i}`} accessibilityLabel={`Like this answer`} onPress={() => onLikePrompt(i)} style={s.likeBtn} hitSlop={6}>
+              <Ionicons name="heart" size={20} color={colors.brandPrimary} />
+            </Pressable>
+          ) : null}
         </View>
       ))}
       {p.interests.length ? (
@@ -108,4 +113,5 @@ const useStyles = makeStyles((c) => ({
   bio: { color: c.onSurfaceSecondary, fontSize: font.lg, lineHeight: 24 },
   answer: { color: c.onSurface, fontSize: font.xl, fontWeight: "600", lineHeight: 28 },
   chips: { flexDirection: "row", flexWrap: "wrap", gap: spacing.sm },
+  likeBtn: { alignSelf: "flex-end", width: 44, height: 44, borderRadius: 22, backgroundColor: c.brandPrimarySoft, alignItems: "center", justifyContent: "center" },
 }));

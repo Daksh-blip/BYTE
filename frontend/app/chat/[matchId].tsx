@@ -68,7 +68,6 @@ export default function Chat() {
   const [typing, setTyping] = useState(false);
   const [voOpened, setVoOpened] = useState<Record<string, boolean>>({});
   const [pendingPhoto, setPendingPhoto] = useState<ImagePicker.ImagePickerAsset | null>(null);
-  const [photoPerm, setPhotoPerm] = useState(false);
   const [aiOpen, setAiOpen] = useState(false);
   const listRef = useRef<FlatList<Row>>(null);
   const other = match?.user ?? null;
@@ -158,13 +157,7 @@ export default function Chat() {
 
   const pickPhoto = async () => {
     if (!other || !canType) return;
-    if (Platform.OS !== "web") {
-      const cur = await ImagePicker.getMediaLibraryPermissionsAsync();
-      if (!cur.granted) {
-        const r = cur.canAskAgain ? await ImagePicker.requestMediaLibraryPermissionsAsync() : cur;
-        if (!r.granted) return setPhotoPerm(true);
-      }
-    }
+    // System photo picker: no photo-library permission needed.
     const res = await ImagePicker.launchImageLibraryAsync({ mediaTypes: ["images"], quality: 0.7 });
     if (!res.canceled && res.assets[0]) setPendingPhoto(res.assets[0]);
   };
@@ -482,12 +475,6 @@ export default function Chat() {
         <Button testID="photo-send-normal" title="Send photo" icon="image-outline" onPress={() => sendPhoto(false)} />
         <Button testID="photo-send-view-once" title="Send as view-once" variant="secondary" icon="eye-outline" onPress={() => sendPhoto(true)} />
         <Button testID="photo-send-cancel" title="Cancel" variant="ghost" onPress={() => setPendingPhoto(null)} />
-      </Sheet>
-
-      <Sheet visible={photoPerm} onClose={() => setPhotoPerm(false)} title="Allow photo access" testID="photo-perm-sheet">
-        <Text style={s.sheetBody}>To share a photo, allow BYTE TALKS to access your photos in Settings. Everything else in chat still works.</Text>
-        <Button testID="photo-perm-settings" title="Open Settings" onPress={() => Linking.openSettings()} />
-        <Button testID="photo-perm-close" title="Not now" variant="ghost" onPress={() => setPhotoPerm(false)} />
       </Sheet>
 
       <Sheet visible={lockInfo} onClose={() => setLockInfo(false)} title="Encryption details" testID="e2ee-info-sheet">
